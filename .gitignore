@@ -1,0 +1,7 @@
+__pycache__/
+.pycache_tmp/
+.yolo/
+output/
+yolo11n.pt
+yolo11m.pt
+.venv
