@@ -1,932 +1,270 @@
-# Vision Guard: Technical Audit and Architecture Manual
+# Vision Guard Technical Documentation
 
-This document is a deterministic, code-backed audit of the repository at `D:\CDAC_PROJECT\5.CV_Project`.
+## 1. Purpose
 
-It is written from the current tracked source files, sample assets, notebook, and local repository structure only. No behavior, dependency, or architecture is described unless it is directly visible in the codebase or in tracked project artifacts.
+Vision Guard indexes CCTV video once and retrieves relevant frames from natural-language queries. The user workflow is scan a video, enter a query, and inspect verified boxed frames in the gallery. The application has no user-facing export feature.
 
-## 1. Executive Summary
-
-Vision Guard is a Python inference application with a Gradio user interface for scan-first CCTV video search.
-
-The design is:
-
-1. sample and filter frames from a video
-2. run object detection on kept frames
-3. persist sampled frame images and frame metadata
-4. embed frames and segments with SigLIP2
-5. build frame and segment search indexes
-6. answer a natural-language query by combining:
-   - detector metadata retrieval
-   - semantic ANN retrieval
-   - dense frame reselection
-   - Qwen visual verification and grounding
-7. optionally segment and export selected matches
-
-The current repository does not contain:
-
-- a training loop
-- a web API service
-- a database
-- a queue worker system
-- LangChain
-- LlamaIndex
-- a vector database server
-- event-detection logic that is active in the runtime path
-
-## 2. Cleanup Audit
-
-### 2.1 Audit outcome
-
-The tracked repository was re-scanned file by file.
-
-- Additional definitively unused tracked files found: none
-- Additional deletions executed in this pass: none
-- Reason: every tracked file is either imported by runtime code, discovered by runtime code, required as configuration/docs/notebook support, or explicitly linked from tracked documentation.
-
-### 2.2 Categories
-
-#### `USED`
-
-Used means imported by source code, discovered dynamically by source code, or required in a concrete documented execution path.
-
-- `app.py`
-- `pipeline.py`
-- `cache_utils.py`
-- `clip_generator.py`
-- `qwen_verifier.py`
-- `report_generator.py`
-- `segmenter.py`
-- `tracker.py`
-- `vector_index.py`
-- `video_reader.py`
-- `vlm.py`
-- `assets/asset1.mp4`
-- `assets/asset2.mp4`
-- `assets/asset3.mp4`
-- `assets/asset4.mp4`
-- `assets/asset5.mp4`
-- `assets/asset6.mp4`
-- `VisionGuard_Colab.ipynb`
-
-#### `CRITICAL / INFRA`
-
-Critical or infrastructure files are preserved because they define dependencies, repository behavior, or primary documentation.
-
-- `.gitignore`
-- `requirements.txt`
-- `README.md`
-- `PROJECT_DOCUMENTATION.md`
-
-#### `USED AS OPTIONAL DOCUMENTATION`
-
-These are not imported by the runtime, but they are intentionally referenced from the main repository docs and preserved as part of the repo’s documented optional integration surface.
-
-- `optional_integrations/headroom/README.md`
-- `optional_integrations/headroom/VISION_GUARD_CONTEXT.md`
-
-#### `LOCAL INFRA PRESERVED`
-
-These are not tracked application source files, but they are legitimate local runtime or environment infrastructure and were intentionally preserved.
-
-- `.venv/`
-- `.yolo/`
-- `output/`
-- `yolo11m.pt`
-
-### 2.3 Proof summary
-
-#### Static import graph
+## 2. Architecture
 
 ```mermaid
 flowchart TD
-    APP["app.py"] --> PIPE["pipeline.py"]
-    APP --> CACHE["cache_utils.py"]
-
-    PIPE --> CACHE
-    PIPE --> CLIP["clip_generator.py"]
-    PIPE --> VER["qwen_verifier.py"]
-    PIPE --> REP["report_generator.py"]
-    PIPE --> SEG["segmenter.py"]
-    PIPE --> TRK["tracker.py"]
-    PIPE --> VIDX["vector_index.py"]
-    PIPE --> VR["video_reader.py"]
-    PIPE --> VLM["vlm.py"]
-
-    SEG --> VER
+    UI["Gradio UI"] --> PIPE["VisionGuardPipeline"]
+    PIPE --> VID["DecordVideoReader"]
+    PIPE --> DET["ObjectTracker / YOLO"]
+    PIPE --> ENC["SearchEncoder / SigLIP2"]
+    PIPE --> IDX["Frame and segment indexes"]
+    PIPE --> VER["QwenFrameVerifier"]
+    PIPE --> GND["GroundedSegmenter"]
+    GND --> VER
 ```
 
-#### Dynamic/runtime references
+`GroundedSegmenter` is now a lightweight grounding adapter. It asks the existing verifier for query boxes and falls back to detector boxes when grounding returns none. It does not load SAM2 or create clips.
 
-- `app.py` discovers sample videos from `assets/*.mp4`
-- `tracker.py` and `pipeline.py` default to `yolo11m.pt`
-- `pipeline.py` writes runtime outputs under `output/`
-- `README.md` and this document reference:
-  - `VisionGuard_Colab.ipynb`
-  - `optional_integrations/headroom/*`
-
-### 2.4 Deletion log
-
-No additional deletions were executed in this pass.
-
-## 3. Repository Inventory
-
-### 3.1 Tracked files
-
-- `.gitignore`
-- `PROJECT_DOCUMENTATION.md`
-- `README.md`
-- `VisionGuard_Colab.ipynb`
-- `app.py`
-- `cache_utils.py`
-- `clip_generator.py`
-- `pipeline.py`
-- `qwen_verifier.py`
-- `report_generator.py`
-- `requirements.txt`
-- `segmenter.py`
-- `tracker.py`
-- `vector_index.py`
-- `video_reader.py`
-- `vlm.py`
-- `assets/asset1.mp4`
-- `assets/asset2.mp4`
-- `assets/asset3.mp4`
-- `assets/asset4.mp4`
-- `assets/asset5.mp4`
-- `assets/asset6.mp4`
-- `optional_integrations/headroom/README.md`
-- `optional_integrations/headroom/VISION_GUARD_CONTEXT.md`
-
-### 3.2 Local runtime / environment items observed
-
-- `.venv/`
-- `.yolo/`
-- `output/`
-- `yolo11m.pt`
-
-These were preserved because they are runtime infrastructure, environment state, or ignored local assets rather than tracked source.
-
-## 4. Top-Level Architecture
-
-```mermaid
-flowchart TD
-    UI["Gradio UI<br/>app.py"] --> PIPE["VisionGuardPipeline<br/>pipeline.py"]
-    PIPE --> READER["DecordVideoReader<br/>video_reader.py"]
-    PIPE --> DET["ObjectTracker<br/>tracker.py"]
-    PIPE --> ENC["SearchEncoder (SigLIP2)<br/>vlm.py"]
-    PIPE --> FIDX["Frame Vector Index<br/>vector_index.py"]
-    PIPE --> SIDX["Segment Vector Index<br/>vector_index.py"]
-    PIPE --> VER["QwenFrameVerifier<br/>qwen_verifier.py"]
-    PIPE --> SEG["GroundedSegmenter (SAM2)<br/>segmenter.py"]
-    PIPE --> CLIP["ClipGenerator<br/>clip_generator.py"]
-    PIPE --> REP["ReportGenerator<br/>report_generator.py"]
-    PIPE --> CACHE["Cache Bootstrap<br/>cache_utils.py"]
-    UI --> WARM["Warmup Thread"]
-    WARM --> PIPE
-```
-
-## 5. End-to-End Data Flow
-
-### 5.1 High-level operational flow
-
-```mermaid
-flowchart LR
-    A["Input Video"] --> B["Frame Sampling"]
-    B --> C["Duplicate / Motion Filter"]
-    C --> D["YOLO Batch Detection"]
-    D --> E["Per-frame Metadata"]
-    E --> F["JPEG Persistence"]
-    E --> G["SigLIP2 Frame Embeddings"]
-    G --> H["Frame Index"]
-    E --> I["Segment Aggregation"]
-    I --> J["Segment Embeddings"]
-    J --> K["Segment Index"]
-    L["User Query"] --> M["Query Normalization"]
-    M --> N["SigLIP2 Text Embedding"]
-    N --> O["Candidate Retrieval"]
-    O --> P["Dense Frame Reselection"]
-    P --> Q["Qwen Verification + Grounding"]
-    Q --> R["Prepared Hits"]
-    R --> S["Optional Segmentation"]
-    S --> T["JSON / CSV / HTML / ZIP Exports"]
-```
-
-### 5.2 Indexing pipeline detail
+## 3. Application flow
 
 ```mermaid
 sequenceDiagram
+    participant U as User
     participant UI as app.py
-    participant PIPE as VisionGuardPipeline
-    participant VR as DecordVideoReader
-    participant YOLO as ObjectTracker
-    participant ENC as SearchEncoder
-    participant DISK as Filesystem
+    participant P as pipeline.py
+    participant V as Qwen verifier
 
-    UI->>PIPE: index_video_iter(video)
-    PIPE->>VR: open video
-    loop sampled frames
-        PIPE->>VR: get_batch(indices)
-        PIPE->>PIPE: _is_interesting_frame(...)
-        PIPE->>YOLO: detect_batch(interesting frames)
-        PIPE->>PIPE: build detections + appearances + motion metadata
-        PIPE->>DISK: submit JPEG writes via thread pool
-        PIPE->>ENC: embed_frames(pending frames)
-        PIPE->>DISK: wait for JPEG writes
-        PIPE->>UI: preview event
-    end
-    PIPE->>PIPE: aggregate frame rows
-    PIPE->>PIPE: aggregate segment rows
-    PIPE->>PIPE: object_counts / total_detections / unique_objects
-    PIPE->>DISK: write frame_index.tvim
-    PIPE->>DISK: write segment_index.tvim
-    PIPE->>DISK: write index.json
-    PIPE->>UI: done event
+    U->>UI: Upload video and scan
+    UI->>P: index_video_iter(video)
+    P->>P: Sample, detect, tag, embed, index
+    P-->>UI: Preview and scan metadata
+    U->>UI: Submit query
+    UI->>P: search_stream(query)
+    P->>P: Retrieve and reselect candidates
+    P->>V: Verify candidates
+    V-->>P: Match, confidence, caption, boxes
+    P->>V: Reuse cached grounding for gallery frame
+    P-->>UI: Prepared boxed hits
+    UI-->>U: Table and gallery
 ```
 
-### 5.3 Query pipeline detail
+## 4. Indexing
 
-```mermaid
-sequenceDiagram
-    participant UI as app.py
-    participant PIPE as VisionGuardPipeline
-    participant ENC as SearchEncoder
-    participant FIDX as Frame Index
-    participant SIDX as Segment Index
-    participant VER as QwenFrameVerifier
-    participant SEG as GroundedSegmenter
+`VisionGuardPipeline.index_video_iter(video, sample_sec=0.75, win_sec=4.5)`:
 
-    UI->>PIPE: search_stream(query) or search(query)
-    PIPE->>PIPE: normalize query
-    PIPE->>PIPE: derive object/color hints
-    PIPE->>ENC: embed_text(query variants)
-    PIPE->>PIPE: detector-first retrieval
-    alt no detector hits
-        PIPE->>FIDX: frame ANN search
-        PIPE->>PIPE: optional object fallback
-        PIPE->>SIDX: segment ANN search
-    end
-    PIPE->>PIPE: dense frame reselection
-    PIPE->>VER: parallel verify_query(top candidates)
-    VER-->>PIPE: matched/confidence/caption/boxes
-    PIPE->>PIPE: score promotion/demotion
-    PIPE->>UI: prepared hits
-    UI->>PIPE: export_selected(...)
-    PIPE->>SEG: segment_clip(...)
+1. Creates a timestamped run directory.
+2. Samples frames through `DecordVideoReader`.
+3. Rejects low-information or near-duplicate frames.
+4. Runs YOLO detection and tracking on kept frames.
+5. Adds object labels, detections, motion values, vehicle color tags, and appearance tags.
+6. Writes frame JPEGs while SigLIP2 embeds the pending batch.
+7. Builds frame and segment vector indexes.
+8. Writes internal index artifacts in `reports/`.
+
+Indexing does not run Qwen verification or grounding. Removing user exports did not change the sampling, detection, embedding, or index-build path.
+
+## 5. Query retrieval
+
+`_candidate_hits()` performs retrieval in this order:
+
+1. Detector-first retrieval for supported object and color queries.
+2. Frame ANN retrieval using a SigLIP2 text embedding.
+3. Object fallback retrieval.
+4. Low-confidence frame clustering for non-strict queries.
+5. Segment ANN retrieval.
+
+Top candidates are densely reselected from the original video before verification. Simple supported object queries verify a smaller shortlist. Detailed or event-style queries verify up to eight candidates through the existing shared worker pool. This increases recall for detailed queries without modifying indexing work.
+
+Vehicle color metadata applies only to vehicle object classes. Clothing-color phrases such as `person wearing yellow jacket` remain semantic queries rather than being rejected because people do not have vehicle paint tags.
+
+Unsupported simple object labels remain conservative: `taxi` is not silently treated as `car`.
+
+## 6. Color retrieval
+
+`_estimate_color()` only analyzes the central 45% of a detected vehicle bounding box. The central crop reduces contamination from asphalt, surrounding traffic, shadows, and detector-box background. HSV saturation, brightness, and hue ratios determine the available color tags.
+
+This is a heuristic, not a paint-classification model. Strong reflections, partial occlusion, night footage, and inaccurate detector boxes can still reduce color accuracy.
+
+## 7. Verification and gallery boxing
+
+`QwenFrameVerifier.verify_query()` evaluates the full query conservatively. A verified match requires both a positive match decision and at least one cleaned box. The verifier caches results by normalized query plus frame key or path.
+
+`prepare_hits()` creates gallery rows. For every hit, `_attach_gallery_frame()` calls `GroundedSegmenter.detect()` with the frame key. This reuses cached verifier output where available, draws the returned boxes with OpenCV, and writes a `boxed_match_*.jpg` image to `segments/`.
+
+Gallery box states are explicit:
+
+- `grounded`: Qwen verified and localized the submitted query.
+- `detector`: a supported object/color detector fallback box is shown because Qwen did not localize the query.
+- `none`: no localizable box is available, so the raw representative frame is shown.
+
+## 8. User interface
+
+`app.py` exposes:
+
+- video input
+- scan button and live preview
+- natural-language query input
+- result summary and result table
+- boxed-frame gallery
+
+It does not expose clip, HTML, CSV, JSON, ZIP, or report download controls.
+
+## 9. Internal artifacts
+
+Each run contains `frames/`, `segments/`, and `reports/`.
+
+`reports/` is an internal storage location for the vector-index files and `index.json` metadata created during indexing. It is not an export feature and has no UI download action.
+
+## 10. Runtime requirements
+
+Install [requirements.txt](requirements.txt), then run:
+
+```bash
+python app.py
 ```
 
-## 6. Application Entry Point
+The active environment must include OpenCV because the pipeline reads images and draws bounding boxes with it. CUDA availability changes model execution behavior. Windows CPU development uses the verifier's `dev_passthrough` backend, which returns no verified match and no Qwen box; this is not fidelity-preserving inference.
 
-### 6.1 `app.py`
+## 11. Configuration
 
-Role: top-level Gradio process, UI layout, event wiring, and user-facing status rendering.
+`settings.py` centralizes operational defaults and reads environment overrides at process start. It validates positive integer and non-negative float settings, falling back to the default on invalid input.
 
-Responsibilities:
+The configurable values cover model identifiers, YOLO confidence/image size, worker count, vector-index bit width, sample/window duration, query result count, gallery columns, and verification timeout. The Gradio host and sharing options remain controlled by `VISION_GUARD_HOST` and `GRADIO_SHARE` in `app.py`.
 
-- initialize runtime cache behavior via `setup_cache()`
-- instantiate `VisionGuardPipeline`
-- launch background model warmup
-- detect local versus Colab/Kaggle runtime
-- decide Gradio bind host and sharing mode
-- discover sample assets from `assets/*.mp4`
-- stream scan progress and query results into Gradio components
-- expose generated export files
+## 12. Constraints
 
-Primary UI event handlers:
-
-- `scan_only(video)`
-- `find_query(q)`
-- `export_selected(picks, q, hits)`
-- `get_system_status()`
-
-Important current UI behavior:
-
-- the `info` markdown now includes object count summaries after scan completion
-- the `status` markdown is reused for both warmup state and scan/query status
-- only the first hit receives an overlaid gallery frame by default via `_attach_gallery_frame()`
-
-## 7. Core Orchestrator
-
-### 7.1 `pipeline.py`
-
-Role: single orchestrator for scanning, indexing, retrieval, verification, segmentation, and export.
-
-Constructor defaults:
-
-- `out_dir="output"`
-- `yolo="yolo11m.pt"`
-- `clip_model="google/siglip2-so400m-patch14-384"`
-- `verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ"`
-- `sam="facebook/sam2.1-hiera-small"`
-
-Long-lived state:
-
-- `self.trk`
-- `self.enc`
-- `self.vlm`
-- `self.ver`
-- `self.seg`
-- `self.idx`
-- `self.run_dir`
-- `self.clip`
-- `self.rep`
-- `self.last_hits`
-- `self.search_idx`
-- `self.frame_idx`
-- `self.pool`
-- `self.raw_jobs`
-- `self.seg_jobs`
-- `self._warmup_failures`
-- `self._warmup_done`
-
-### 7.2 Threading model
-
-The shared executor is currently:
-
-- `ThreadPoolExecutor(max_workers=4)`
-
-It is used for:
-
-- overlapped scan-time JPEG writes
-- parallel Qwen verification of top query candidates
-- optional background raw-clip generation
-- optional background segmentation jobs
-
-### 7.3 Query understanding and object heuristics
-
-The pipeline implements:
-
-- query normalization
-- small synonym replacements
-- supported object extraction
-- supported color extraction
-- exact-object conservatism for unsupported simple labels
-- explicit rejection of event-style queries
-
-Examples of supported normalized concepts:
-
-- `person`
-- `car`
-- `truck`
-- `bus`
-- `motorcycle`
-- `bicycle`
-- `umbrella`
-- `backpack`
-- `suitcase`
-- `handbag`
-
-Examples of color modifiers:
-
-- `yellow`
-- `white`
-- `black`
-- `gray`
-- `red`
-- `blue`
-- `green`
-- `orange`
-- `brown`
-
-Event-style terms intentionally rejected:
-
-- `fight`
-- `fall`
-- `accident`
-- `collision`
-- `crowd`
-- `loitering`
-- `violence`
-- related variants encoded in `_ABSTRACT_TERMS` and `_is_event_query()`
-
-### 7.4 Index build algorithm
-
-`index_video_iter(video, sample_sec=0.75, win_sec=4.5)` currently performs:
+- Result quality depends on sampled-frame visibility, detector quality, embedding relevance, and verifier accuracy.
+- The verifier is invoked only after retrieval narrows the candidate set; it is not an exhaustive video scan.
+- On Windows CPU development mode, Qwen is unavailable. The search path returns low-confidence semantic candidates with an explicit unverified status instead of returning an empty result or claiming verification.
+- Detailed-query verification can take longer than simple object retrieval because it examines more candidates.
+- A gallery box proves that a grounding result or detector fallback was available; it is not a guarantee of real-world identity or event truth.
 
-1. create a timestamped run directory
-2. reset YOLO tracker state
-3. open the video through `DecordVideoReader`
-4. compute sample indices from `sample_sec`
-5. batch-read sampled frames
-6. reject near-duplicates or low-motion frames with `_is_interesting_frame()`
-7. run YOLO `detect_batch()` on kept candidates
-8. reject empty/non-content frames with `_is_non_content_frame()`
-9. derive per-frame metadata:
-   - objects
-   - detections
-   - vehicle color hints
-   - appearance tags
-   - motion score
-   - keep reason
-   - object delta
-   - still-people heuristics
-10. queue JPEG writes to the thread pool
-11. run `SearchEncoder.embed_frames()` for the pending batch
-12. wait for the JPEG writes to complete
-13. finalize frame rows and frame embedding chunks
-14. aggregate fixed-width segment rows
-15. build frame and segment ANN indexes
-16. write `reports/index.json`
-17. emit one final metadata payload
+## 13. Review questions and answers
 
-### 7.5 Scan metadata contract
+### Why build both frame and segment indexes?
 
-`self.idx["meta"]` contains:
+Frame indexes support precise visual matches. Segment indexes provide a broader temporal representation when a single sampled frame is weak. Using both gives retrieval two granularities.
 
-- `video`
-- `fps`
-- `frames`
-- `duration`
-- `sample_sec`
-- `win_sec`
-- `segments`
-- `object_counts`
-- `total_detections`
-- `unique_objects`
+### Why use detector-first retrieval when semantic retrieval exists?
 
-The final yielded Gradio payload also adds:
+For supported object and color queries, stored YOLO metadata is a fast exact-class filter. Semantic retrieval remains useful for detail that the detector does not encode.
 
-- `retriever`
-- `segment_retriever`
-- `verifier`
+### What does dense frame reselection solve?
 
-### 7.6 Object count feature
+It replaces a coarse sampled representative with the most query-relevant frame found inside the selected time window.
 
-After all frame rows are finalized, the pipeline aggregates per-frame object labels into:
+### Why verify after ANN narrowing?
 
-- `object_counts`: ordered by descending count
-- `total_detections`: total number of counted object labels across indexed frames
-- `unique_objects`: number of unique object labels seen
+Qwen verification is more expensive than vector search. ANN retrieval narrows the number of frames that require visual reasoning.
 
-The UI then renders this in the scan info panel.
+### Why reject unsupported simple object labels conservatively?
 
-### 7.7 Retrieval strategy
+Treating an unsupported label as a nearby supported class can create misleading matches. The code avoids that substitution.
 
-`_candidate_hits()` currently applies the following ordered strategy:
+### Are event queries disabled?
 
-1. detector-first retrieval
-2. frame ANN retrieval
-3. object-fallback retrieval
-4. low-confidence clustered frame retrieval for non-strict queries
-5. segment ANN retrieval
+No. Event-style queries now continue into semantic retrieval and Qwen verification. Their accuracy depends on whether the event is visibly represented in the candidate frames.
 
-Dense frame reselection is then applied to top candidates before verification.
+### How does vehicle color work?
 
-### 7.8 Verification and ranking
+The pipeline analyzes the center 45% of a YOLO vehicle box in HSV space and stores a color tag when its heuristic thresholds are met.
 
-The top rows are verified through `QwenFrameVerifier.verify_query()`.
+### Why can supported object queries return a result without verifier confirmation?
 
-Current behavior:
+The pipeline allows trusted detector/object-fallback rows for supported object queries when no verified row is available. This preserves useful object retrieval while marking weaker evidence through the result flow.
 
-- verified matches receive score boosts
-- unverified captioned rows are retained but demoted
-- rows without useful verifier output are demoted more strongly
-- detector/object-fallback rows may still be returned as trusted fallbacks for supported object queries
+### Does the project create segmented clips or reports?
 
-### 7.9 Streaming versus non-streaming query behavior
+No. User-facing clip generation, SAM2 segmentation, and HTML, CSV, JSON, ZIP, and report exports were removed.
 
-`search_stream()`:
+### Why does the verifier cache include the frame key and query?
 
-- verifies top candidates incrementally
-- emits only confirmed rows as they become available
-- falls back to trusted detector/object-fallback rows if no confirmations are emitted and the query is object-oriented
+The same frame can be used in retrieval, verification, and gallery boxing. The key prevents repeated model work for the same normalized query and frame.
 
-`search()`:
+### Why is the shared thread pool limited to four workers?
 
-- verifies top candidates in one pass
-- returns confirmed rows if any
-- otherwise falls back to trusted detector/object-fallback rows for supported object queries
+The code uses four workers for JPEG writes and query verification. The limit bounds concurrent CPU/GPU-adjacent work and avoids unbounded task creation.
 
-### 7.10 Export behavior
+### Does removing exports affect indexing speed?
 
-`export_selected(picks, query)`:
+No indexing stage depends on user export code. Sampling, detection, embedding, and index construction remain in the scan path.
 
-1. resolves chosen prepared hits
-2. ensures each match has a segmented or raw clip
-3. writes:
-   - selected JSON
-   - selected CSV
-   - selected HTML
-   - selected ZIP
+### What does a boxed gallery image mean?
 
-The ZIP contains clips only:
+It shows a verifier-grounded box when Qwen localized the submitted query, a clearly labeled detector fallback for supported object/color queries, or no box when neither is available. It helps visual review but is not a guarantee beyond the model evidence.
 
-- selected segmented clips when available
-- selected raw clips as fallback or additional files
+### Can the project be declared end-to-end verified here?
 
-## 8. Supporting Modules
+No. Source compilation and static callback checks can be run without full dependencies, but an end-to-end run requires an environment with the declared runtime packages and compatible model resources.
 
-### 8.1 `cache_utils.py`
+## 14. Source-file reference
 
-Purpose:
+### `app.py`
 
-- configure Hugging Face and model-cache paths, primarily for Colab + Google Drive persistence
+Builds the Gradio Blocks UI and owns UI event wiring. `_in_colab`, `_server_name`, and `_share_enabled` derive launch behavior. `_sample_videos` lists bundled MP4 examples. `_meta`, `_ans`, `_gallery`, and `_find_payload` transform pipeline dictionaries into Gradio values. `scan_only` streams four scan outputs. `find_query` streams six search outputs. `get_system_status` returns the warmup status. The module creates `VisionGuardPipeline`, starts its background warmup thread, and launches only when run as the main module.
 
-Behavior:
+### `settings.py`
 
-- copies any discovered Hugging Face token into environment variables
-- attempts `huggingface_hub.login(...)`
-- returns early outside `/content/drive/MyDrive`
-- sets:
-  - `HF_HOME`
-  - `TRANSFORMERS_CACHE`
-  - `HUGGINGFACE_HUB_CACHE`
-  - `TORCH_HOME`
-  - `YOLO_CONFIG_DIR`
-  - `ULTRALYTICS_SETTINGS`
+Provides `cfg`, the process-start configuration object. `_text`, `_int`, and `_float` read environment values and reject empty, non-numeric, or out-of-range numeric input by returning their defaults. `Settings` contains model paths, scan and retrieval limits, index options, and UI limits. Configuration is not reloaded while the process is running.
 
-### 8.2 `clip_generator.py`
+### `cache_utils.py`
 
-Purpose:
+Reads any supported Hugging Face token environment variable and configures persistent cache locations only when the Colab Drive directory exists. Its Hugging Face login failure is intentionally non-fatal, so local execution without a token can continue.
 
-- create raw MP4 clips for candidate windows
+### `pipeline.py`
 
-Implementation details:
+`VisionGuardPipeline` orchestrates the application. `_estimate_color` creates vehicle appearance tags. `_new_run` creates one timestamped output directory. `_is_interesting_frame`, `_is_non_content_frame`, and signature helpers reduce duplicate/empty indexing work. `_candidate_hits` ranks detector, frame, fallback, weak-frame, and segment candidates. `_reselect_best_frame` chooses a better representative inside a hit window. `_verify_rows` and `_verify_rows_stream` apply Qwen verification. `_attach_gallery_frame` renders grounded or detector-fallback boxes. `index_video_iter` builds in-memory frame and segment indexes and writes internal artifacts. `search_stream` and `search` return confirmed rows, with detector fallback for supported object queries. `prepare_hits` formats gallery-ready rows.
 
-- uses OpenCV `VideoCapture` / `VideoWriter`
-- pads clip boundaries by default
-- optionally rewrites the temporary MP4 through `ffmpeg` to H.264 `yuv420p` with `+faststart`
+### `tracker.py`
 
-### 8.3 `report_generator.py`
+`ObjectTracker` wraps Ultralytics YOLO. `load` selects the configured model and device. `class_ids` and `names` expose model classes. `track`, `detect`, and `detect_batch` normalize YOLO outputs into dictionaries containing `box`, `conf`, `cls`, and `name`.
 
-Purpose:
+### `vlm.py`
 
-- serialize selected matches and index metadata as JSON, CSV, HTML, and ZIP
+`SearchEncoder` loads the configured SigLIP2-compatible Transformers model and processor. `embed_text`, `embed_frame`, and `embed_frames` return L2-normalized `float32` vectors. CUDA batches use mixed precision; CPU uses normal no-grad inference.
 
-CSV fields:
+### `qwen_verifier.py`
 
-- `rank`
-- `score`
-- `start`
-- `end`
-- `duration`
-- `summary`
-- `objects`
-- `tracks`
-- `clip`
+`QwenFrameVerifier` selects vLLM on CUDA when available, otherwise the Transformers backend. On Windows without CUDA it uses a non-fidelity development passthrough that returns no verified match or box. `_clean_boxes` accepts normalized, pixel, and 0–1000 box coordinates, clamps them to image bounds, and drops invalid boxes. `verify_query` requests a JSON decision, applies confidence thresholds, caches by normalized query plus frame identity, and returns `matched`, `confidence`, `caption`, and `boxes`. `ground_phrase` returns only boxes from a verified result.
 
-### 8.4 `vector_index.py`
+### `segmenter.py`
 
-Purpose:
+`GroundedSegmenter.detect` delegates grounding to `QwenFrameVerifier` and returns verifier boxes or supplied detector fallback boxes, plus a boolean stating whether the boxes were grounded.
 
-- wrap ANN/index behavior behind one interface
+### `vector_index.py`
 
-Backends:
+`SegmentVectorIndex` validates 2-D vectors and aligned IDs. It uses turbovec when available and falls back to exact NumPy dot-product search. `build_merged` combines scan chunks before building.
 
-- `turbovec` when available and build succeeds
-- `numpy` fallback otherwise
+### `video_reader.py`
 
-Persisted artifacts:
+`DecordVideoReader` prefers Decord and falls back to OpenCV. It validates frame indices, converts decoded RGB arrays to BGR for OpenCV consumers, and exposes frame batches and timestamps.
 
-- `frame_index.tvim`
-- `segment_index.tvim`
+## 15. Models and dependency facts
 
-### 8.5 `video_reader.py`
+| Component | Configured default | Code integration | Code-recorded rationale |
+| --- | --- | --- | --- |
+| Object detector | `yolo11m.pt` | `ObjectTracker` through Ultralytics YOLO | Used for class metadata, tracking, and detector fallback boxes. |
+| Image/text encoder | `google/siglip2-so400m-patch14-384` | `SearchEncoder` through Transformers | Produces normalized vectors for frame, segment, and text retrieval. |
+| Visual verifier | `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` | `QwenFrameVerifier` through vLLM or Transformers | Performs literal query confirmation and localization after candidate narrowing. |
+| Vector backend | turbovec, NumPy fallback | `SegmentVectorIndex` | Uses turbovec when importable; keeps NumPy exact search available when it is not. |
 
-Purpose:
+The repository does not contain benchmark results or a recorded comparison against alternative model families. It therefore cannot support a factual claim that these defaults are universally more accurate than alternatives.
 
-- abstract random and batched frame access
+## 16. Data contracts
 
-Behavior:
+### Detection row
 
-- primary path: `decord.VideoReader`
-- fallback path: `cv2.VideoCapture`
+`{"box": [x1, y1, x2, y2], "conf": number, "cls": integer, "name": string}`. Boxes are pixel coordinates from YOLO and are rounded to two decimals.
 
-Exposed methods:
+### Frame row
 
-- `get_frame(idx)`
-- `get_batch(indices)`
-- `ts_for(idx)`
+Contains `frame_id`, `frame`, `ts`, `emb`, `frame_path`, and `meta`. The persisted/index metadata includes objects, appearances, detections, motion information, and tracking IDs.
 
-### 8.6 `tracker.py`
+### Search hit
 
-Purpose:
+Contains `query`, `score`, `base_score`, `start`, `end`, `peak_ts`, frame paths, object/tracking metadata, summary text, and optional verifier fields. Gallery preparation adds `match_id`, `label`, `gallery_frame`, and `gallery_box_source` (`grounded`, `detector`, or `none`).
 
-- detection and tracking wrapper around Ultralytics YOLO
+### Verifier response
 
-Current defaults:
+`{"matched": boolean, "confidence": number from 0 to 1, "caption": string, "boxes": list}`. Invalid, inverted, or out-of-image boxes are removed before use.
 
-- model: `yolo11m.pt`
-- confidence: `0.22`
-- image size: `640`
-- tracker config: `botsort.yaml`
+## 17. Compatibility and troubleshooting
 
-Important local infrastructure dependency:
+The requirements pin Gradio to `>=5,<6` and Transformers to `>=4.57,<5`. The project was observed with Gradio 6.19.0, whose browser bundle raised an undefined-index JavaScript error while the app used pre-6 UI behavior, and Transformers 5.12.1, which emitted model token-config warnings. The verified environment now has Gradio 5.50.0 and Transformers 4.57.6. Restart the app after dependency changes. `pip check` and Ruff lint both pass in that environment.
 
-- `YOLO_CONFIG_DIR` defaults into `.yolo/`
-
-### 8.7 `vlm.py`
-
-Purpose:
-
-- SigLIP2 image and text embedding
-
-Current performance behavior:
-
-- CPU batch size: `8`
-- CUDA batch size:
-  - `32` on A100
-  - `16` on other detected CUDA GPUs
-- `embed_frames()` uses:
-  - `torch.no_grad()`
-  - CUDA autocast to FP16 when on GPU
-
-Current rationale:
-
-- image embedding dominates scan cost
-- text embedding is cheap and is left simple
-- `torch.compile` is intentionally disabled because of Gradio worker-thread incompatibility noted in the source comment
-
-### 8.8 `qwen_verifier.py`
-
-Purpose:
-
-- exact visual query verification
-- box grounding for matched visual evidence
-
-Backends:
-
-- `vllm`
-- Hugging Face Transformers
-- `dev_passthrough` on Windows CPU local development
-
-Current performance behavior:
-
-- default generation limit reduced to `100` tokens
-- vLLM default sampling uses `max_tokens=100`
-- results are cached by:
-  - normalized query text
-  - frame key or frame path
-
-Verifier output contract:
-
-- `matched`
-- `confidence`
-- `caption`
-- `boxes`
-
-### 8.9 `segmenter.py`
-
-Purpose:
-
-- translate verifier grounding into SAM2 masks and segmented clips
-
-Behavior:
-
-- asks Qwen for boxes through `ground_phrase()`
-- falls back to detector boxes when Qwen does not localize
-- segments the first two boxes per sampled segmentation frame
-- returns raw clip when no grounded mask is produced
-
-## 9. Technology Stack and Selection Rationale
-
-### 9.1 Gradio
-
-Chosen because the current app is a direct interactive UI with:
-
-- streaming scan updates
-- file uploads
-- galleries
-- tabular result rendering
-- downloadable exports
-
-### 9.2 Decord
-
-Chosen because the scan path needs batch and random-access frame retrieval, which is used directly by:
-
-- sampled scan batches
-- dense reselection
-
-### 9.3 Ultralytics YOLO
-
-Chosen because the project depends on:
-
-- inexpensive per-frame object metadata
-- exact supported object class matching
-- high-speed detector-first candidate generation
-
-### 9.4 SigLIP2
-
-Chosen because the project requires both:
-
-- text-to-frame retrieval
-- image-to-image frame reselection scoring
-
-### 9.5 turbovec
-
-Chosen opportunistically as an in-process ANN backend with a NumPy fallback when unavailable.
-
-### 9.6 Qwen2.5-VL-7B-Instruct-AWQ
-
-Chosen because the project requires:
-
-- literal verification of the exact user query
-- conservative decision-making
-- localization boxes for visible evidence
-
-### 9.7 SAM2.1 Hiera Small
-
-Chosen because the export path requires:
-
-- turning grounding boxes into masks
-- producing human-reviewable segmented clips
-
-## 10. Data Contracts
-
-### 10.1 Frame row: `self.idx["frames"]`
-
-- `frame_id: int`
-- `frame: int`
-- `ts: float`
-- `frame_path: str`
-- `representative_frame_path: str`
-- `objects: list[str]`
-- `appearances: list[str]`
-- `tracks: list`
-- `detections: list[dict]`
-- `motion_score: float`
-- `keep_reason: str`
-- `still_people: int`
-- `object_delta: int`
-
-### 10.2 Segment row: `self.idx["segments"]`
-
-- `seg_id`
-- `start: float`
-- `end: float`
-- `mid: float`
-- `emb`
-- `frame_path: str`
-- `objects: list[str]`
-- `tracks: list`
-- `temporal_stats: dict`
-- `tags: list`
-
-### 10.3 Prepared hit row
-
-Prepared rows may contain:
-
-- `query`
-- `score`
-- `base_score`
-- `retrieval_mode`
-- `cache_key`
-- `start`
-- `end`
-- `peak_ts`
-- `representative_frame_path`
-- `frame_path`
-- `objects`
-- `tracks`
-- `appearances`
-- `det_boxes`
-- `matched_detections`
-- `summary`
-- `verified_caption`
-- `verified_match`
-- `verify_score`
-- `grounded`
-- `low_confidence`
-- `gallery_frame`
-- `raw_clip`
-- `clip`
-- `frames`
-- `segmented`
-- `label`
-- `match_id`
-
-## 11. Environment Variables
-
-Runtime-visible environment variables include:
-
-- `HF_TOKEN`
-- `HUGGINGFACE_TOKEN`
-- `HUGGINGFACEHUB_API_TOKEN`
-- `HF_HOME`
-- `TRANSFORMERS_CACHE`
-- `HUGGINGFACE_HUB_CACHE`
-- `TORCH_HOME`
-- `YOLO_CONFIG_DIR`
-- `ULTRALYTICS_SETTINGS`
-- `VISION_GUARD_HOST`
-- `GRADIO_SHARE`
-- `COLAB_RELEASE_TAG`
-- `COLAB_BACKEND_VERSION`
-- `COLAB_GPU`
-- `JPY_PARENT_PID`
-- `KAGGLE_KERNEL_RUN_TYPE`
-
-## 12. Colab Execution Path
-
-`VisionGuard_Colab.ipynb` currently:
-
-1. clones or refreshes the repo under `/content/visionguard-ai`
-2. mounts Google Drive
-3. optionally loads `HF_TOKEN` from Colab secrets
-4. configures persistent cache directories
-5. installs `requirements.txt`
-6. optionally prints GPU info
-7. sets:
-   - `VISION_GUARD_HOST=0.0.0.0`
-   - `GRADIO_SHARE=1`
-8. runs `python -u app.py`
-
-The notebook examples are aligned with the current runtime behavior and emphasize supported object-oriented queries rather than disabled event-style queries.
-
-## 13. Operational Constraints and Edge Cases
-
-### 13.1 Event queries are intentionally disabled
-
-Event-style query terms are rejected before retrieval. This is deliberate current behavior.
-
-### 13.2 Unsupported exact-object labels are rejected conservatively
-
-The runtime avoids substituting nearby classes for unsupported exact labels.
-
-Example:
-
-- a query like `taxi` will not be silently widened to `car`
-
-### 13.3 Windows CPU local verification is a bypass mode
-
-`dev_passthrough` is not fidelity-preserving inference. It exists only to make local Windows CPU development usable.
-
-### 13.4 Segmentation is export-time only
-
-Scan-time indexing does not run SAM2 segmentation. Segmentation is deferred until the user exports selected hits.
-
-### 13.5 Search warmup gating
-
-Both `search_stream()` and `search()` wait for up to 30 seconds for the verifier backend to leave the uninitialized state before proceeding.
-
-### 13.6 Trusted fallback results
-
-If Qwen does not confirm any match, object-oriented queries may still return detector-first or object-fallback hits.
-
-## 14. Performance-Relevant Current Features
-
-### 14.1 Faster indexing
-
-Current code-backed scan optimizations:
-
-- larger CUDA image batch sizes in `vlm.py`
-- mixed-precision FP16 image embedding through autocast
-- no-grad inference
-- overlapped JPEG writes using the shared thread pool
-
-### 14.2 Faster query verification
-
-Current code-backed query optimizations:
-
-- Qwen generation limit reduced to 100 tokens
-- active verifier result cache
-- parallel top-candidate verification using the shared executor
-
-### 14.3 Object count display after indexing
-
-The index metadata now surfaces aggregate object counts, which are rendered directly in the UI after scan completion.
-
-## 15. Suggested Reading Order
-
-1. `README.md`
-2. `app.py`
-3. `pipeline.py`
-4. `tracker.py`
-5. `vlm.py`
-6. `qwen_verifier.py`
-7. `segmenter.py`
-8. `video_reader.py`
-9. `clip_generator.py`
-10. `report_generator.py`
-11. `vector_index.py`
-12. `VisionGuard_Colab.ipynb`
-13. `optional_integrations/headroom/README.md`
-
-## 16. Interview-Grade Review Questions
-
-1. Why does the application build both frame and segment indexes instead of only one?
-2. Why is detector-first retrieval useful even when semantic retrieval exists?
-3. What failure mode does dense frame reselection solve?
-4. Why is Qwen verification deferred until after ANN narrowing?
-5. Why are unsupported exact-object labels rejected rather than loosely substituted?
-6. Why are event queries currently out of scope?
-7. How does the color heuristic interact with supported vehicle classes?
-8. Why does the pipeline preserve trusted detector/object-fallback results even when Qwen does not confirm them?
-9. Why is segmentation deferred to export time?
-10. What operational tradeoffs come from the Windows CPU verifier bypass?
-11. What performance benefit is gained by overlapping JPEG writes with SigLIP2 embedding?
-12. Why is `torch.compile` intentionally disabled in `vlm.py`?
-13. Why is the verifier cache keyed by normalized query plus frame key/path?
-14. Why is the shared thread pool capped at four workers?
-15. Which current notebook instructions are not behaviorally aligned with the runtime code?
-
-## 17. Final State
-
-The current repository is a production-style inference application with:
-
-- a single orchestrator
-- explicit model wrappers
-- deterministic on-disk outputs
-- current code-backed documentation
-- no additional tracked files proven safe to delete
-
-The repository remains backward-compatible with its current runtime structure, and the main documentation now reflects the actual implementation rather than older intermediate states.
+The `HTTP_422_UNPROCESSABLE_ENTITY` messages are Gradio/Starlette deprecation warnings. `WinError 10054` is a closed client socket. Neither message alone proves a retrieval-model failure. Hugging Face authentication warnings indicate reduced download rate limits; set `HF_TOKEN` to authenticate downloads.

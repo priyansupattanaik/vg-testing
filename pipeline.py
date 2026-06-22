@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -9,9 +10,8 @@ import cv2
 import numpy as np
 
 from cache_utils import setup_cache
-from clip_generator import ClipGenerator
 from qwen_verifier import QwenFrameVerifier
-from report_generator import ReportGenerator
+from settings import cfg
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
 from vector_index import SegmentVectorIndex
@@ -21,25 +21,29 @@ from vlm import SearchEncoder
 setup_cache()
 
 
+def _write_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return path
+
+
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", sam="facebook/sam2.1-hiera-small"):
-        self.out_dir = out_dir
-        self.trk = ObjectTracker(model=yolo)
+    def __init__(self, out_dir=None, yolo=None, clip_model=None, verifier_model=None):
+        self.out_dir = out_dir or cfg.out_dir
+        yolo = yolo or cfg.yolo_model
+        clip_model = clip_model or cfg.clip_model
+        verifier_model = verifier_model or cfg.verifier_model
+        self.trk = ObjectTracker(model=yolo, conf=cfg.yolo_conf, imgsz=cfg.yolo_imgsz)
         self.enc = SearchEncoder(model=clip_model)
         self.vlm = self.enc
         self.ver = QwenFrameVerifier(model=verifier_model)
-        self.seg = GroundedSegmenter(sam=sam, verifier_model=verifier_model, verifier=self.ver)
+        self.seg = GroundedSegmenter(verifier_model=verifier_model, verifier=self.ver)
         self.idx = None
         self.run_dir = None
-        self.clip = None
-        self.rep = None
-        self.last_hits = []
-        self.search_idx = SegmentVectorIndex(bit_width=4)
-        self.frame_idx = SegmentVectorIndex(bit_width=4)
-        self.pool = ThreadPoolExecutor(max_workers=4)
-        self.raw_jobs = {}
-        self.seg_jobs = {}
-        os.makedirs(out_dir, exist_ok=True)
+        self.search_idx = SegmentVectorIndex(bit_width=cfg.index_bit_width)
+        self.frame_idx = SegmentVectorIndex(bit_width=cfg.index_bit_width)
+        self.pool = ThreadPoolExecutor(max_workers=cfg.index_workers)
+        os.makedirs(self.out_dir, exist_ok=True)
         self._warmup_failures = {}
         self._warmup_done = False
 
@@ -125,9 +129,6 @@ class VisionGuardPipeline:
             tags.append(name)
         return sorted(set(tags))
 
-    def _clip_name(self, i, kind):
-        return f"match_{i:02d}_{kind}"
-
     def _iou(self, a, b):
         ax1, ay1, ax2, ay2 = a
         bx1, by1, bx2, by2 = b
@@ -148,12 +149,8 @@ class VisionGuardPipeline:
         self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}")
         if os.path.exists(self.run_dir):
             shutil.rmtree(self.run_dir)
-        for x in ["frames", "clips", "reports", "segments"]:
+        for x in ["frames", "reports", "segments"]:
             os.makedirs(os.path.join(self.run_dir, x), exist_ok=True)
-        self.clip = ClipGenerator(os.path.join(self.run_dir, "clips"))
-        self.rep = ReportGenerator(os.path.join(self.run_dir, "reports"))
-        self.raw_jobs = {}
-        self.seg_jobs = {}
 
     def _cos(self, a, b):
         den = float(np.linalg.norm(a) * np.linalg.norm(b))
@@ -296,7 +293,7 @@ class VisionGuardPipeline:
             if wanted and name not in wanted:
                 continue
             color = det.get("color")
-            if qcolors:
+            if qcolors and set(qobjs) & {"car", "truck", "bus", "motorcycle", "bicycle"}:
                 if not color or color not in qcolors:
                     continue
             if cls_to_name and int(det.get("cls", -1)) in cls_to_name:
@@ -316,6 +313,8 @@ class VisionGuardPipeline:
             return []
         qobjs = set(self._q_objs(q))
         qcolors = set(self._query_colors(q))
+        if qcolors and not qobjs & {"car", "truck", "bus", "motorcycle", "bicycle"}:
+            return []
         rows = []
         for row in self.idx.get("frames", []):
             matched = self._matching_detections(row, qobjs, qcolors, cls_to_name)
@@ -377,24 +376,51 @@ class VisionGuardPipeline:
         frame = cv2.imread(src_path)
         if frame is None:
             return src_path
+        h, w = frame.shape[:2]
         for box in boxes:
             x1, y1, x2, y2 = [int(round(v)) for v in box]
+            x1 = max(0, min(w - 1, x1))
+            x2 = max(0, min(w - 1, x2))
+            y1 = max(0, min(h - 1, y1))
+            y2 = max(0, min(h - 1, y2))
+            if x2 <= x1 or y2 <= y1:
+                continue
             cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 220, 120), 2)
         if label_text:
             cv2.putText(frame, label_text, (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
         out_path = os.path.join(self.run_dir, "segments", out_name)
-        cv2.imwrite(out_path, frame)
-        return out_path
+        return out_path if cv2.imwrite(out_path, frame) else src_path
+
+    def _gallery_fallback_boxes(self, row, query):
+        matched = row.get("matched_detections", [])
+        if matched:
+            return [x["box"] for x in matched if x.get("box")]
+        qobjs = set(self._q_objs(query))
+        qcolors = set(self._query_colors(query))
+        if not qobjs:
+            return []
+        out = []
+        for det in row.get("detections", []):
+            if det.get("name") not in qobjs:
+                continue
+            if qcolors and qobjs & {"car", "truck", "bus", "motorcycle", "bicycle"} and det.get("color") not in qcolors:
+                continue
+            if det.get("box"):
+                out.append(det["box"])
+        return out
 
     def _attach_gallery_frame(self, row, query):
         src = row.get("representative_frame_path") or row.get("frame_path")
         if not src:
             row["gallery_frame"] = src
             return row
-        boxes, _, _ = self.seg.detect(src, query, fallback_boxes=row.get("det_boxes", []))
+        fallback = self._gallery_fallback_boxes(row, query)
+        boxes, _, _, grounded = self.seg.detect(src, query, fallback_boxes=fallback, frame_key=row.get("cache_key"))
+        row["gallery_box_source"] = "grounded" if grounded else "detector" if boxes else "none"
         if boxes:
             stamp = int(round(row.get("peak_ts", row.get("start", 0.0)) * 100))
-            row["gallery_frame"] = self._draw_boxes(src, boxes, f"boxed_match_{row.get('match_id', 0):02d}_{stamp:06d}.jpg", label_text=f"{query} @ {row.get('peak_ts', row.get('start', 0.0)):.2f}s")
+            kind = "grounded" if grounded else "detector fallback"
+            row["gallery_frame"] = self._draw_boxes(src, boxes, f"boxed_match_{row.get('match_id', 0):02d}_{stamp:06d}.jpg", label_text=f"{kind}: {query}")
         else:
             row["gallery_frame"] = src
         return row
@@ -505,7 +531,7 @@ class VisionGuardPipeline:
         results = [None] * take
         for future, idx in futures.items():
             try:
-                results[idx] = future.result(timeout=30)
+                results[idx] = future.result(timeout=cfg.verify_timeout_sec)
             except Exception:
                 results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
         for i, result in enumerate(results):
@@ -549,7 +575,7 @@ class VisionGuardPipeline:
         results = [None] * take
         for future, idx in futures.items():
             try:
-                results[idx] = future.result(timeout=30)
+                results[idx] = future.result(timeout=cfg.verify_timeout_sec)
             except Exception:
                 results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
         for i, result in enumerate(results):
@@ -632,7 +658,7 @@ class VisionGuardPipeline:
                 continue
             appear = set(row.get("appearances", []))
             color_hit = 0
-            if qcolors:
+            if qcolors and set(qobjs) & {"car", "truck", "bus", "motorcycle", "bicycle"}:
                 for color in qcolors:
                     for obj in qobjs:
                         if f"{color} {obj}" in appear:
@@ -689,7 +715,9 @@ class VisionGuardPipeline:
             hit["low_confidence"] = True
         return hits
 
-    def index_video_iter(self, video, sample_sec=0.75, win_sec=4.5):
+    def index_video_iter(self, video, sample_sec=None, win_sec=None):
+        sample_sec = sample_sec or cfg.sample_sec
+        win_sec = win_sec or cfg.window_sec
         self._new_run(video)
         self.trk.reset()
         vr = DecordVideoReader(video)
@@ -906,7 +934,7 @@ class VisionGuardPipeline:
         self.frame_idx.build_merged(frame_chunks, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
         self.search_idx.build_merged(seg_chunks, path=os.path.join(self.run_dir, "reports", "segment_index.tvim"))
         path = os.path.join(self.run_dir, "reports", "index.json")
-        self.rep.write_json(
+        _write_json(
             path,
             {
                 "meta": {
@@ -967,7 +995,7 @@ class VisionGuardPipeline:
                 self._warmup_failures[name] = str(e)
         self._warmup_done = True
 
-    def warmup_status(self) -> str:
+    def warmup_status(self):
         if not self._warmup_done:
             return "Models loading..."
         if not self._warmup_failures:
@@ -982,10 +1010,9 @@ class VisionGuardPipeline:
         ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
-        if self._is_event_query(raw_q):
-            return q, qv, qobjs, [], 0
         if self._is_simple_unsupported_object_query(raw_q):
             return q, qv, qobjs, [], 0
+        deep = self._is_event_query(raw_q) or not self._is_strict_object_query(q)
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=min(4, len(detector_hits)))
@@ -1008,7 +1035,7 @@ class VisionGuardPipeline:
                     score += 0.1 * hit
                 else:
                     score -= 0.08
-            if qcolors and qobjs:
+            if qcolors and set(qobjs) & {"car", "truck", "bus", "motorcycle", "bicycle"}:
                 color_hit = 0
                 for color in qcolors:
                     for obj in qobjs:
@@ -1039,7 +1066,7 @@ class VisionGuardPipeline:
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
-            verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
+            verify_n = min(8, len(out)) if deep or not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
@@ -1053,7 +1080,7 @@ class VisionGuardPipeline:
                 hit["retrieval_mode"] = "weak_semantic"
             if weak:
                 weak = self._apply_reselection(weak, q, qv, top_n=min(4, len(weak)))
-                verify_n = min(8, len(weak)) if not qobjs else 1
+                verify_n = min(8, len(weak)) if deep or not qobjs else 1
                 return q, qv, qobjs, weak, verify_n
         n = len(self.idx["segments"])
         if n == 0:
@@ -1105,7 +1132,7 @@ class VisionGuardPipeline:
             out.append(row)
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
-            verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
+            verify_n = min(8, len(out)) if deep or not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         return q, qv, qobjs, [], 0
 
@@ -1119,6 +1146,9 @@ class VisionGuardPipeline:
                 if self.ver.backend not in (None, "none"):
                     break
                 time.sleep(1)
+        if self.ver.backend == "dev_passthrough":
+            yield self._unverified_rows(candidates, "visual verifier unavailable on Windows CPU")[:top_k]
+            return
         working = [dict(x) for x in candidates]
         confirmed = []
         emitted = set()
@@ -1145,6 +1175,8 @@ class VisionGuardPipeline:
                 if self.ver.backend not in (None, "none"):
                     break
                 time.sleep(1)
+        if self.ver.backend == "dev_passthrough":
+            return self._unverified_rows(candidates, "visual verifier unavailable on Windows CPU")[:top_k]
         checked = self._verify_rows(candidates, checked_q, top_n=verify_n)
         confirmed = self._confirmed_rows(checked)[:top_k]
         if confirmed:
@@ -1154,86 +1186,26 @@ class VisionGuardPipeline:
             return sorted(trusted, key=lambda x: x["score"], reverse=True)[:top_k]
         return []
 
+    def _unverified_rows(self, rows, reason):
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["low_confidence"] = True
+            item["verified_match"] = False
+            item["summary"] = f"unverified visual candidate at {item.get('peak_ts', item['start']):.2f}s | {reason}"
+            out.append(item)
+        return sorted(out, key=lambda x: x["score"], reverse=True)
+
     def prepare_hits(self, hits, query):
         out = []
         for i, hit in enumerate(hits, 1):
             row = dict(hit)
             row["match_id"] = i
-            row["raw_clip"] = None
-            row["clip"] = None
-            row["frames"] = []
-            row["segmented"] = False
             row["label"] = f"{i}. {hit.get('peak_ts', hit['start']):.2f}s"
             row["representative_frame_path"] = row.get("representative_frame_path") or row.get("frame_path")
             row["gallery_frame"] = row["representative_frame_path"]
             row = self._attach_gallery_frame(row, query)
             out.append(row)
-        self.last_hits = out
         return out
 
-    def _build_raw_clip(self, row):
-        name = self._clip_name(row["match_id"], "raw")
-        path = self.clip.clip_path(self.idx["video"], row["start"], row["end"], name, pad=1.5)
-        if os.path.exists(path):
-            return path
-        return self.clip.extract_clip(self.idx["video"], row["start"], row["end"], name, pad=1.5)
 
-    def _ensure_raw_clip(self, row, wait=True):
-        if row["raw_clip"]:
-            return row["raw_clip"]
-        job = self.raw_jobs.get(row["match_id"])
-        if job is None:
-            if wait:
-                row["raw_clip"] = self._build_raw_clip(row)
-                row["clip"] = row["raw_clip"]
-                return row["raw_clip"]
-            self.raw_jobs[row["match_id"]] = self.pool.submit(self._build_raw_clip, dict(row))
-            return None
-        if not wait and not job.done():
-            return None
-        row["raw_clip"] = job.result()
-        if not row["clip"]:
-            row["clip"] = row["raw_clip"]
-        return row["raw_clip"]
-
-    def _segment_payload(self, row, query):
-        raw = self._build_raw_clip(row)
-        seg_dir = os.path.join(self.run_dir, "segments", f"m_{row['match_id']:02d}")
-        os.makedirs(seg_dir, exist_ok=True)
-        seg_mp4 = os.path.join(self.run_dir, "clips", f"{self._clip_name(row['match_id'], 'seg')}.mp4")
-        seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3, fallback_boxes=row.get("det_boxes", []))
-        return {"raw_clip": raw, "clip": seg_clip if seen > 0 else raw, "frames": frames, "seen": seen}
-
-    def _start_segment(self, row, query):
-        if row["segmented"] or row["match_id"] in self.seg_jobs:
-            return
-        self.seg_jobs[row["match_id"]] = self.pool.submit(self._segment_payload, dict(row), query)
-
-    def _ensure_segment(self, row, query):
-        if row["segmented"]:
-            return row
-        job = self.seg_jobs.get(row["match_id"])
-        if job is None:
-            payload = self._segment_payload(row, query)
-        else:
-            payload = job.result()
-        row["raw_clip"] = payload["raw_clip"]
-        row["clip"] = payload["clip"]
-        row["frames"] = payload["frames"]
-        row["segmented"] = bool(payload["seen"] > 0)
-        if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
-            row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
-        return row
-
-    def export_selected(self, picks, query):
-        rows = [x for x in self.last_hits if x["label"] in picks]
-        if not rows:
-            return None, None, None
-        for row in rows:
-            self._ensure_segment(row, query)
-        base = datetime.now().strftime("%Y%m%d_%H%M%S")
-        js = self.rep.write_json(os.path.join(self.run_dir, "reports", f"selected_{base}.json"), {"hits": rows})
-        csv = self.rep.write_csv(os.path.join(self.run_dir, "reports", f"selected_{base}.csv"), rows)
-        html = self.rep.write_html(os.path.join(self.run_dir, "reports", f"selected_{base}.html"), {"query": rows[0]["query"], "video": self.idx["video"], "hits": rows})
-        zipf = self.rep.write_zip(os.path.join(self.run_dir, "reports", f"selected_{base}.zip"), [x["clip"] for x in rows] + [x["raw_clip"] for x in rows])
-        return zipf, html, csv

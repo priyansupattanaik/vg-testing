@@ -60,7 +60,7 @@ class SearchEncoder:
     def embed_text(self, txt):
         self.load()
         txt = f"this is a photo of {txt.strip().lower()}"
-        inp = self.p(text=[txt], return_tensors="pt").to(self.dev)
+        inp = self.p(text=[txt], truncation=True, return_tensors="pt").to(self.dev)
         with torch.no_grad():
             vec = self.m.get_text_features(**inp)
         return self._norm(vec)

@@ -1,76 +1,42 @@
 # Vision Guard
 
-Vision Guard is a scan-first CCTV video search application with a Gradio UI. It scans a video once, stores frame and segment embeddings, and then answers natural-language queries by combining detector metadata, SigLIP2 retrieval, dense frame reselection, Qwen visual verification, and optional SAM2 segmentation during export.
+Vision Guard is a scan-first CCTV video search app with a Gradio interface. It indexes a video once, then retrieves and verifies frames for natural-language queries.
 
-This repository is intentionally a single-process inference application. There is no training loop, database server, REST API, or external orchestration service in the tracked runtime code.
-
-## Pipeline Overview
-
-![Vision Guard AI: CCTV Search and Analysis Pipeline](CCTV_Search_and_Analysis_Pipeline.png)
-
-## Documentation
-
-- Full technical manual: [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md)
-- Optional external context-compression notes: [optional_integrations/headroom/README.md](optional_integrations/headroom/README.md)
-- Colab launcher notebook: [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb)
-
-## Audit Status
-
-The repository was re-audited against the current codebase state.
-
-- Tracked source/runtime files: preserved
-- Sample assets: preserved
-- Optional documentation scaffolds: preserved
-- Additional definitively unused files found in the tracked repo: none
-- Additional deletions executed in this pass: none
-
-Local environment and runtime infrastructure observed during audit and intentionally preserved:
-
-- `.venv/`
-- `.yolo/`
-- `output/`
-- `yolo11m.pt`
-
-## System Overview
-
-```mermaid
-flowchart TD
-    UI["Gradio UI<br/>app.py"] --> PIPE["VisionGuardPipeline<br/>pipeline.py"]
-    PIPE --> VR["DecordVideoReader<br/>video_reader.py"]
-    PIPE --> DET["ObjectTracker<br/>tracker.py"]
-    PIPE --> ENC["SearchEncoder (SigLIP2)<br/>vlm.py"]
-    PIPE --> FIDX["Frame Index<br/>SegmentVectorIndex"]
-    PIPE --> SIDX["Segment Index<br/>SegmentVectorIndex"]
-    PIPE --> VER["QwenFrameVerifier<br/>qwen_verifier.py"]
-    PIPE --> SEG["GroundedSegmenter (SAM2)<br/>segmenter.py"]
-    PIPE --> CLIP["ClipGenerator<br/>clip_generator.py"]
-    PIPE --> REP["ReportGenerator<br/>report_generator.py"]
-    UI --> WARM["Background Warmup Thread"]
-    WARM --> PIPE
-```
-
-## End-to-End Flow
+## Current flow
 
 ```mermaid
 flowchart LR
-    A["Video Input"] --> B["Sample Frames"]
-    B --> C["Motion / Duplicate Filter"]
-    C --> D["YOLO Batch Detection"]
-    D --> E["Frame Metadata + JPEG Writes"]
-    E --> F["SigLIP2 Frame Embeddings"]
-    F --> G["Frame Index"]
-    F --> H["Segment Aggregation + Segment Index"]
-    I["User Query"] --> J["SigLIP2 Text Embedding"]
-    J --> K["Detector / Frame / Segment Candidate Retrieval"]
-    K --> L["Dense Frame Reselection"]
-    L --> M["Qwen Verification + Grounding"]
-    M --> N["Prepared Hits"]
-    N --> O["Optional Segmentation + Clip Export"]
+    A["Upload video"] --> B["Sample and filter frames"]
+    B --> C["YOLO detections and color tags"]
+    C --> D["SigLIP2 frame and segment indexes"]
+    E["Natural-language query"] --> F["Candidate retrieval"]
+    D --> F
+    F --> G["Dense frame reselection"]
+    G --> H["Qwen verification and grounding"]
+    H --> I["Boxed gallery results"]
 ```
 
-## Quick Start
+Indexing uses YOLO, SigLIP2, and the vector indexes. Query verification uses Qwen after candidates have been narrowed. Query-time gallery boxing reuses the verifier cache when the frame and query match.
 
-### Local
+## Features
+
+- Scan-time frame sampling, duplicate filtering, object detection, and frame/segment indexing
+- Detector-first retrieval for supported objects and vehicle colors
+- Semantic retrieval for detailed and event-style language
+- Dense frame reselection before verification
+- Conservative Qwen visual verification with localized bounding boxes
+- Grounded and clearly labeled detector-fallback boxed result images saved under each run's `segments/` directory
+- No user-facing export controls or generated clips/reports
+
+## Query behavior
+
+Supported detector objects include `person`, `car`, `truck`, `bus`, `motorcycle`, `bicycle`, `umbrella`, `backpack`, `suitcase`, and `handbag`.
+
+Vehicle-color queries support `yellow`, `white`, `black`, `gray`, `red`, `blue`, `green`, `orange`, and `brown`. Vehicle color is estimated from the centered 45% of the detected box to reduce road and shadow influence.
+
+Detailed queries such as `person near a gate`, `yellow car entering`, or `car collision` proceed through semantic retrieval and Qwen verification. A displayed verified result requires Qwen to confirm and localize the query. On Windows CPU development mode, the app returns clearly labeled low-confidence visual candidates because Qwen verification is unavailable. Gallery captions identify whether the box is grounded, a detector fallback, or not localized.
+
+## Run locally
 
 ```bash
 pip install -r requirements.txt
@@ -79,112 +45,50 @@ python app.py
 
 Open `http://127.0.0.1:7860`.
 
-### Colab
+The active Python environment must provide the packages in `requirements.txt`, including OpenCV, PyTorch, Ultralytics, Transformers, Decord, and Gradio. On Windows without CUDA, the verifier uses development passthrough mode and does not provide Qwen-grounded boxes; only labeled detector fallback boxes are available for supported object queries.
 
-Use [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb). The intended notebook flow is:
+## Configuration
 
-1. Clone or refresh the repo in `/content/visionguard-ai`
-2. Mount Google Drive
-3. Optionally load `HF_TOKEN` from Colab secrets
-4. Configure persistent cache directories under `/content/drive/MyDrive/visionguard_cache`
-5. Install `requirements.txt`
-6. Set:
-   - `VISION_GUARD_HOST=0.0.0.0`
-   - `GRADIO_SHARE=1`
-7. Run `python -u app.py`
-8. Open the printed `gradio.live` URL
+Operational settings are read from environment variables when the application starts. Invalid numeric values fall back to their safe defaults.
 
-## Current Feature Set
+- `VISION_GUARD_OUTPUT_DIR`
+- `VISION_GUARD_YOLO_MODEL`
+- `VISION_GUARD_CLIP_MODEL`
+- `VISION_GUARD_VERIFIER_MODEL`
+- `VISION_GUARD_YOLO_CONF`
+- `VISION_GUARD_YOLO_IMGSZ`
+- `VISION_GUARD_INDEX_WORKERS`
+- `VISION_GUARD_INDEX_BIT_WIDTH`
+- `VISION_GUARD_SAMPLE_SEC`
+- `VISION_GUARD_WINDOW_SEC`
+- `VISION_GUARD_QUERY_TOP_K`
+- `VISION_GUARD_GALLERY_COLUMNS`
+- `VISION_GUARD_VERIFY_TIMEOUT_SEC`
+- `VISION_GUARD_HOST`
+- `GRADIO_SHARE`
 
-- Scan-first indexing with live preview during sampling
-- Frame-level and segment-level retrieval
-- Detector-first exact-object retrieval for supported classes
-- Query normalization and limited synonym handling
-- Object count aggregation shown after scan completion
-- Faster scan path through larger image batches, mixed precision, and overlapped JPEG writes
-- Faster query verification through reduced Qwen token budgets, active result caching, and parallel top-hit verification
-- Export of selected clips, segmented clips, HTML, CSV, JSON, and ZIP packages
+## Runtime layout
 
-## Tracked Repository Layout
+- `app.py` — Gradio UI and scan/search event wiring
+- `pipeline.py` — indexing, retrieval, reranking, verification, and boxed-image creation
+- `segmenter.py` — query-grounding adapter with detector-box fallback
+- `qwen_verifier.py` — visual verification, box cleaning, caching, and backend selection
+- `tracker.py` — YOLO detection and tracking wrapper
+- `vlm.py` — SigLIP2 image/text embeddings
+- `vector_index.py` — frame and segment vector search
+- `video_reader.py` — Decord/OpenCV video access
+- `cache_utils.py` — model-cache configuration
 
-### Runtime code
+## Run output
 
-- `app.py`
-- `pipeline.py`
-- `cache_utils.py`
-- `clip_generator.py`
-- `qwen_verifier.py`
-- `report_generator.py`
-- `segmenter.py`
-- `tracker.py`
-- `vector_index.py`
-- `video_reader.py`
-- `vlm.py`
+Each scan creates a timestamped directory under `output/` containing:
 
-### Configuration and dependency files
+- `frames/` — sampled and reselected frame images
+- `segments/` — boxed gallery-match images
+- `reports/` — internal index artifacts (`frame_index.tvim`, `segment_index.tvim`, and `index.json`)
 
-- `.gitignore`
-- `requirements.txt`
+The internal index artifacts are not exposed as user downloads.
 
-### User and technical documentation
+## Documentation
 
-- `README.md`
-- `PROJECT_DOCUMENTATION.md`
-- `VisionGuard_Colab.ipynb`
-- `optional_integrations/headroom/README.md`
-- `optional_integrations/headroom/VISION_GUARD_CONTEXT.md`
-
-### Sample assets
-
-- `assets/asset1.mp4`
-- `assets/asset2.mp4`
-- `assets/asset3.mp4`
-- `assets/asset4.mp4`
-- `assets/asset5.mp4`
-- `assets/asset6.mp4`
-
-## Runtime Stack
-
-- UI: Gradio
-- Video access: Decord with OpenCV fallback
-- Detection and tracking wrapper: Ultralytics YOLO with BoT-SORT tracker configuration
-- Image/text retrieval model: `google/siglip2-so400m-patch14-384`
-- Visual verification and grounding: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
-- Segmentation: `facebook/sam2.1-hiera-small`
-- Vector search backend: turbovec `IdMapIndex` with NumPy fallback
-- Reporting: JSON, CSV, HTML, ZIP
-
-## Query Semantics
-
-The current pipeline is object-focused.
-
-- Supported detector-style queries such as `person`, `white car`, `yellow car`, `truck`, `umbrella`, and `backpack` can use detector metadata directly.
-- Event-style queries such as `fight`, `accident`, `collision`, `crowd`, `fall`, and `loitering` are intentionally rejected before retrieval.
-- Unsupported simple exact-object labels are also rejected conservatively rather than loosely substituted.
-- Trusted detector/object-fallback hits may still be returned when verifier confirmation is absent, but only for supported object-style queries.
-
-## Outputs
-
-Each scan creates a timestamped run directory under `output/` containing:
-
-- `frames/`
-- `clips/`
-- `reports/`
-- `segments/`
-
-The scan report metadata now includes:
-
-- `video`
-- `fps`
-- `frames`
-- `duration`
-- `sample_sec`
-- `win_sec`
-- `segments`
-- `object_counts`
-- `total_detections`
-- `unique_objects`
-
-## Read Next
-
-For the full architecture, file-by-file audit, data contracts, Mermaid diagrams, and operational caveats, continue to [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md).
+See [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) for architecture, retrieval behavior, constraints, and answered review questions.

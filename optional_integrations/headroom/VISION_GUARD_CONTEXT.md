@@ -5,7 +5,7 @@ This file is a lightweight repository snapshot for optional external compression
 ## Repository Identity
 
 - Project name: `Vision Guard`
-- Audited workspace path: `D:\CDAC_PROJECT\5.CV_Project`
+- Workspace path: `D:\CDAC PROJECT\visionguard-ai`
 - Runtime style: Python inference app with Gradio UI
 - Training loop present: no
 
@@ -14,9 +14,7 @@ This file is a lightweight repository snapshot for optional external compression
 - `app.py`
 - `pipeline.py`
 - `cache_utils.py`
-- `clip_generator.py`
 - `qwen_verifier.py`
-- `report_generator.py`
 - `segmenter.py`
 - `tracker.py`
 - `vector_index.py`
@@ -30,7 +28,7 @@ This file is a lightweight repository snapshot for optional external compression
 - Detector metadata: Ultralytics YOLO
 - Retrieval embedding model: SigLIP2 So400m
 - Verification and grounding: Qwen2.5-VL-7B-Instruct-AWQ
-- Segmentation: SAM2.1 Hiera Small
+- Gallery grounding: Qwen verifier with detector-box fallback
 - Vector index: turbovec with NumPy fallback
 
 ## Current Behavioral Summary
@@ -49,22 +47,23 @@ This file is a lightweight repository snapshot for optional external compression
 
 1. normalize the query
 2. derive supported object and color hints
-3. reject event-style queries
-4. run detector-first and semantic retrieval
+3. run detector-first and semantic retrieval
 5. reselect dense best frames
 6. verify top candidates with Qwen in parallel
 7. cache verifier results by query and frame key
 
-### Export path
+On Windows CPU development mode, Qwen verification is unavailable. The query path returns explicitly low-confidence semantic candidates instead of claiming a verified match.
 
-1. resolve selected hits
-2. generate or reuse raw clips
-3. segment selected clips with SAM2 using Qwen or detector boxes
-4. write JSON, CSV, HTML, and ZIP outputs
+### Gallery path
+
+1. prepare confirmed hits
+2. reuse verifier results through the query and frame cache key
+3. draw grounded boxes on gallery images
 
 ## Current Notable Constraints
 
-- event-style queries are intentionally disabled
+- event-style queries use semantic retrieval and Qwen verification
+- vehicle paint tags apply only to vehicle queries; clothing-color phrases use semantic retrieval
 - unsupported simple exact-object labels are rejected conservatively
 - Windows CPU uses a verifier development bypass rather than full Qwen inference
 - Headroom is not part of the runtime path

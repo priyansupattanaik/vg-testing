@@ -32,7 +32,7 @@ class QwenFrameVerifier:
         self.cache = {}
         self.lock = threading.Lock()
 
-    def _confidence_threshold(self, query: str) -> float:
+    def _confidence_threshold(self, query):
         if any(t in query.lower() for t in self._ABSTRACT_TERMS):
             return 0.30
         return 0.45
@@ -200,8 +200,8 @@ class QwenFrameVerifier:
     def verify_query(self, frame_path, query, frame_key=None):
         if self.backend == "dev_passthrough":
             return {
-                "matched": True,
-                "confidence": 0.55,
+                "matched": False,
+                "confidence": 0.0,
                 "caption": "[dev mode — Qwen skipped on Windows CPU]",
                 "boxes": []
             }
