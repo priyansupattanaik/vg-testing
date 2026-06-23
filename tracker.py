@@ -10,11 +10,10 @@ from ultralytics import YOLO  # noqa: E402
 
 
 class ObjectTracker:
-    def __init__(self, model="yolo11m.pt", conf=0.22, imgsz=640, tracker="botsort.yaml", device=None):
+    def __init__(self, model="yolo11m.pt", conf=0.22, imgsz=640, device=None):
         self.model_name = model
         self.conf = conf
         self.imgsz = imgsz
-        self.tracker = tracker
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.use_half = self.dev == "cuda"
         self.m = None
@@ -56,36 +55,6 @@ class ObjectTracker:
     def names(self):
         self.load()
         return {int(k): str(v) for k, v in self.m.names.items()}
-
-    def track(self, frame, cls=None):
-        self.load()
-        res = self.m.track(
-            frame,
-            persist=True,
-            verbose=False,
-            conf=self.conf,
-            imgsz=self.imgsz,
-            half=self.use_half,
-            tracker=self.tracker,
-            classes=cls,
-        )
-        out = []
-        for r in res:
-            if r.boxes is None or r.boxes.id is None:
-                continue
-            ids = r.boxes.id.int().cpu().tolist()
-            boxes = r.boxes.xyxy.cpu().tolist()
-            confs = r.boxes.conf.cpu().tolist()
-            clss = r.boxes.cls.int().cpu().tolist()
-            for tid, box, cf, ci in zip(ids, boxes, confs, clss):
-                out.append({
-                    "id": int(tid),
-                    "box": [round(x, 2) for x in box],
-                    "conf": round(float(cf), 4),
-                    "cls": int(ci),
-                    "name": self.m.names.get(int(ci), str(ci)),
-                })
-        return out
 
     def detect(self, frame, cls=None, conf=None):
         self.load()

@@ -5,3 +5,5 @@ output/
 yolo11n.pt
 yolo11m.pt
 .venv
+.venv*/
+.venv311/

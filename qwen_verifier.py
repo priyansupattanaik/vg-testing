@@ -263,6 +263,6 @@ class QwenFrameVerifier:
             self.cache[key] = dict(result)
         return result
 
-    def ground_phrase(self, frame_path, phrase, multi=True, frame_key=None):
+    def ground_phrase(self, frame_path, phrase, frame_key=None):
         result = self.verify_query(frame_path, phrase, frame_key=frame_key)
         return result.get("boxes", []) if result.get("matched") else []

@@ -10,6 +10,4 @@ class GroundedSegmenter:
         boxes = grounded
         if not boxes:
             boxes = fallback_boxes or []
-        scores = [max(0.15, 1.0 - 0.08 * i) for i in range(len(boxes))]
-        texts = [query.strip().lower()] * len(boxes)
-        return boxes, scores, texts, bool(grounded)
+        return boxes, bool(grounded)

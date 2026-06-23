@@ -12,7 +12,6 @@ class SearchEncoder:
         self.image_batch_size = self._default_image_batch_size()
         self.p = None
         self.m = None
-        self.compiled = False
 
     def _default_image_batch_size(self):
         if self.dev != "cuda":
@@ -33,13 +32,6 @@ class SearchEncoder:
         self.m = AutoModel.from_pretrained(self.model_name, torch_dtype=dtype, device_map=None)
         self.m.to(self.dev)
         self.m.eval()
-        self._maybe_compile()
-
-    def _maybe_compile(self):
-        # torch.compile with CUDA graphs is incompatible with Gradio's
-        # worker-thread execution model (TLS assertion failure at runtime).
-        # SigLIP2-So400m is fast enough on GPU without compilation.
-        self.compiled = False
 
     def _vec(self, x):
         if hasattr(x, "pooler_output"):

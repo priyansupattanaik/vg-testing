@@ -44,7 +44,6 @@ class VisionGuardPipeline:
         verifier_model = verifier_model or cfg.verifier_model
         self.trk = ObjectTracker(model=yolo, conf=cfg.yolo_conf, imgsz=cfg.yolo_imgsz)
         self.enc = SearchEncoder(model=clip_model)
-        self.vlm = self.enc
         self.ver = QwenFrameVerifier(model=verifier_model)
         self.seg = GroundedSegmenter(verifier_model=verifier_model, verifier=self.ver)
         self.idx = None
@@ -57,21 +56,13 @@ class VisionGuardPipeline:
         self._warmup_done = False
 
     def _color_words(self):
-        return {
-            "yellow": np.array([220.0, 190.0, 60.0], dtype=np.float32),
-            "white": np.array([215.0, 215.0, 215.0], dtype=np.float32),
-            "black": np.array([35.0, 35.0, 35.0], dtype=np.float32),
-            "gray": np.array([135.0, 135.0, 135.0], dtype=np.float32),
-            "red": np.array([180.0, 65.0, 65.0], dtype=np.float32),
-            "blue": np.array([70.0, 110.0, 185.0], dtype=np.float32),
-            "green": np.array([80.0, 150.0, 90.0], dtype=np.float32),
-            "orange": np.array([210.0, 140.0, 65.0], dtype=np.float32),
-            "brown": np.array([125.0, 95.0, 70.0], dtype=np.float32),
-        }
+        return (
+            "yellow", "white", "black", "gray", "red", "blue", "green", "orange", "brown",
+        )
 
     def _query_colors(self, q):
         q = f" {self._normalize_query(q)} "
-        return [x for x in self._color_words().keys() if f" {x} " in q]
+        return [x for x in self._color_words() if f" {x} " in q]
 
     def _estimate_color(self, frame, box):
         h, w = frame.shape[:2]
@@ -138,20 +129,6 @@ class VisionGuardPipeline:
             tags.append(name)
         return sorted(set(tags))
 
-    def _iou(self, a, b):
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        x1 = max(ax1, bx1)
-        y1 = max(ay1, by1)
-        x2 = min(ax2, bx2)
-        y2 = min(ay2, by2)
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-        inter = (x2 - x1) * (y2 - y1)
-        aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
-        bb = max(1.0, (bx2 - bx1) * (by2 - by1))
-        return inter / (aa + bb - inter)
-
     def _new_run(self, video):
         name = os.path.splitext(os.path.basename(video))[0]
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -160,10 +137,6 @@ class VisionGuardPipeline:
             self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}_{uuid.uuid4().hex[:8]}")
         for x in ["frames", "reports", "segments"]:
             os.makedirs(os.path.join(self.run_dir, x), exist_ok=True)
-
-    def _cos(self, a, b):
-        den = float(np.linalg.norm(a) * np.linalg.norm(b))
-        return 0.0 if den == 0 else float(np.dot(a, b) / den)
 
     def _preview(self, frame, tracks, ts):
         out = frame.copy()
@@ -295,7 +268,7 @@ class VisionGuardPipeline:
         tokens = self._normalize_query(q).split()
         if not tokens or self._q_objs(q) or self._is_event_query(q):
             return False
-        color_words = set(self._color_words().keys())
+        color_words = set(self._color_words())
         stop_words = {
             "a", "an", "the", "near", "next", "beside", "behind", "front", "of",
             "on", "in", "at", "with", "without", "left", "right", "top", "bottom",
@@ -437,7 +410,7 @@ class VisionGuardPipeline:
             row["gallery_frame"] = src
             return row
         fallback = self._gallery_fallback_boxes(row, query)
-        boxes, _, _, grounded = self.seg.detect(src, query, fallback_boxes=fallback, frame_key=row.get("cache_key"))
+        boxes, grounded = self.seg.detect(src, query, fallback_boxes=fallback, frame_key=row.get("cache_key"))
         row["gallery_box_source"] = "grounded" if grounded else "detector" if boxes else "none"
         if boxes:
             stamp = int(round(row.get("peak_ts", row.get("start", 0.0)) * 100))
@@ -492,7 +465,7 @@ class VisionGuardPipeline:
             for idx, frame in zip(chunk, frames):
                 if frame is None:
                     continue
-                emb = self.vlm.embed_frame(frame)
+                emb = self.enc.embed_frame(frame)
                 score = float(np.dot(emb, query_vec))
                 ts = vr.ts_for(idx)
                 if score > best_score:
