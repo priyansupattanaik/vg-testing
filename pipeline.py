@@ -1,8 +1,8 @@
 import os
 import re
-import shutil
 import time
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -24,6 +24,15 @@ setup_cache()
 def _write_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def _write_image(path, frame):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if frame is None or not cv2.imwrite(path, frame):
+        raise IOError(f"failed to write image: {path}")
     return path
 
 
@@ -145,10 +154,10 @@ class VisionGuardPipeline:
 
     def _new_run(self, video):
         name = os.path.splitext(os.path.basename(video))[0]
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}")
         if os.path.exists(self.run_dir):
-            shutil.rmtree(self.run_dir)
+            self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}_{uuid.uuid4().hex[:8]}")
         for x in ["frames", "reports", "segments"]:
             os.makedirs(os.path.join(self.run_dir, x), exist_ok=True)
 
@@ -215,6 +224,16 @@ class VisionGuardPipeline:
         for k, rows in m.items():
             if any(x in q for x in rows):
                 out.add(k)
+        # Keep the query vocabulary aligned with the configured detector instead
+        # of limiting object search to the aliases above.
+        words = set(q.split())
+        singular_words = {word[:-1] for word in words if len(word) > 3 and word.endswith("s")}
+        query_words = words | singular_words
+        for name in self.trk.names().values():
+            label = str(name).strip().lower()
+            label_words = label.split()
+            if label_words and all(word in query_words for word in label_words):
+                out.add(label)
         return sorted(out)
 
     def _is_event_query(self, q):
@@ -389,7 +408,10 @@ class VisionGuardPipeline:
         if label_text:
             cv2.putText(frame, label_text, (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
         out_path = os.path.join(self.run_dir, "segments", out_name)
-        return out_path if cv2.imwrite(out_path, frame) else src_path
+        try:
+            return _write_image(out_path, frame)
+        except OSError:
+            return src_path
 
     def _gallery_fallback_boxes(self, row, query):
         matched = row.get("matched_detections", [])
@@ -481,7 +503,7 @@ class VisionGuardPipeline:
             return None, start_sec, -1.0
         safe_start = str(round(start_sec, 2)).replace(".", "_")
         out_path = os.path.join(self.run_dir, "frames", f"resel_{safe_start}.jpg")
-        cv2.imwrite(out_path, best_frame)
+        _write_image(out_path, best_frame)
         return out_path, best_ts, best_score
 
     def _refresh_det_boxes_for_hit(self, hit, query):
@@ -515,9 +537,7 @@ class VisionGuardPipeline:
                 hits[i]["summary"] = f"detector-matched sampled frame at {best_ts:.2f}s | detected: {', '.join(labels)}"
         return hits
 
-    def _verify_rows(self, rows, query, top_n=1):
-        if not rows:
-            return rows
+    def _verification_results(self, rows, query, top_n):
         take = min(top_n, len(rows))
         futures = {
             self.pool.submit(
@@ -528,79 +548,48 @@ class VisionGuardPipeline:
             ): i
             for i in range(take)
         }
-        results = [None] * take
         for future, idx in futures.items():
             try:
-                results[idx] = future.result(timeout=cfg.verify_timeout_sec)
+                yield idx, future.result(timeout=cfg.verify_timeout_sec)
             except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
-        for i, result in enumerate(results):
-            boxes = result.get("boxes", [])
-            caption = result.get("caption", "")
-            matched = bool(result.get("matched"))
-            confidence = float(result.get("confidence", 0.0) or 0.0)
-            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
-            rows[i]["verified_caption"] = caption
-            rows[i]["grounded"] = bool(boxes)
-            rows[i]["verified_match"] = matched
-            rows[i]["verify_score"] = confidence
-            if matched:
-                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
-                label = ", ".join(rows[i].get("objects", [])) or query
-                detail = caption or f"visible match for {query}"
-                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-            elif caption:
-                rows[i]["score"] = float(rows[i]["score"] * 0.6)
-                rows[i]["low_confidence"] = True
-                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
-            else:
-                rows[i]["score"] = float(rows[i]["score"] * 0.5)
-                rows[i]["low_confidence"] = True
-        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
-        return rows
+                yield idx, {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
+
+    def _apply_verification_result(self, row, result, query):
+        boxes = result.get("boxes", [])
+        caption = result.get("caption", "")
+        matched = bool(result.get("matched"))
+        confidence = float(result.get("confidence", 0.0) or 0.0)
+        row["det_boxes"] = boxes or row.get("det_boxes", [])
+        row["verified_caption"] = caption
+        row["grounded"] = bool(boxes)
+        row["verified_match"] = matched
+        row["verify_score"] = confidence
+        if matched:
+            row["score"] = float(row["score"] + min(0.35, 0.16 + 0.18 * confidence))
+            label = ", ".join(row.get("objects", [])) or query
+            detail = caption or f"visible match for {query}"
+            row["summary"] = f"verified query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
+        elif caption:
+            row["score"] = float(row["score"] * 0.6)
+            row["low_confidence"] = True
+            row["summary"] = f"unverified visual candidate at {row.get('peak_ts', row['start']):.2f}s | {caption}"
+        else:
+            row["score"] = float(row["score"] * 0.5)
+            row["low_confidence"] = True
+        return row
+
+    def _verify_rows(self, rows, query, top_n=1):
+        if not rows:
+            return rows
+        for idx, result in self._verification_results(rows, query, top_n):
+            self._apply_verification_result(rows[idx], result, query)
+        return sorted(rows, key=lambda x: x["score"], reverse=True)
 
     def _verify_rows_stream(self, rows, query, top_n=1):
         if not rows:
             return
-        take = min(top_n, len(rows))
-        futures = {
-            self.pool.submit(
-                self.ver.verify_query,
-                rows[i].get("representative_frame_path", rows[i]["frame_path"]),
-                query,
-                rows[i].get("cache_key"),
-            ): i
-            for i in range(take)
-        }
-        results = [None] * take
-        for future, idx in futures.items():
-            try:
-                results[idx] = future.result(timeout=cfg.verify_timeout_sec)
-            except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
-        for i, result in enumerate(results):
-            boxes = result.get("boxes", [])
-            caption = result.get("caption", "")
-            matched = bool(result.get("matched"))
-            confidence = float(result.get("confidence", 0.0) or 0.0)
-            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
-            rows[i]["verified_caption"] = caption
-            rows[i]["grounded"] = bool(boxes)
-            rows[i]["verified_match"] = matched
-            rows[i]["verify_score"] = confidence
-            if matched:
-                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
-                label = ", ".join(rows[i].get("objects", [])) or query
-                detail = caption or f"visible match for {query}"
-                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-            elif caption:
-                rows[i]["score"] = float(rows[i]["score"] * 0.6)
-                rows[i]["low_confidence"] = True
-                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
-            else:
-                rows[i]["score"] = float(rows[i]["score"] * 0.5)
-                rows[i]["low_confidence"] = True
-            yield i, rows[i]
+        for idx, result in self._verification_results(rows, query, top_n):
+            yield idx, self._apply_verification_result(rows[idx], result, query)
 
     def _confirmed_rows(self, rows):
         return [x for x in rows if x.get("verified_match")]
@@ -744,7 +733,7 @@ class VisionGuardPipeline:
             if not pending:
                 return
             write_futures = [
-                self.pool.submit(cv2.imwrite, item["frame_path"], item["frame"])
+                self.pool.submit(_write_image, item["frame_path"], item["frame"])
                 for item in pending
             ]
             emb_list = self.enc.embed_frames([x["frame"] for x in pending])
@@ -1006,17 +995,17 @@ class VisionGuardPipeline:
 
     def _candidate_hits(self, raw_q, top_k=4):
         q = self._normalize_query(raw_q)
-        qv = self._embed_query(raw_q)
-        ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
         if self._is_simple_unsupported_object_query(raw_q):
-            return q, qv, qobjs, [], 0
+            return q, None, qobjs, [], 0
+        qv = self._embed_query(raw_q)
         deep = self._is_event_query(raw_q) or not self._is_strict_object_query(q)
-        detector_hits = self._refine_detector_hits(q, top_k)
+        candidate_limit = min(max(top_k * 3, 8), max(8, len(self.idx.get("frames", [])))) if deep else top_k
+        detector_hits = self._refine_detector_hits(q, candidate_limit)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=min(4, len(detector_hits)))
-            return q, qv, qobjs, hits, min(2, len(hits))
+            return q, qv, qobjs, hits, min(8 if deep else 4, len(hits))
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -1045,8 +1034,6 @@ class VisionGuardPipeline:
                     score += 0.22 * color_hit
                 else:
                     score -= 0.12
-            if "sitting" in ql and "person" in sobj:
-                score += 0.05
             rows.append({
                 "query": q,
                 "score": score,
@@ -1101,8 +1088,6 @@ class VisionGuardPipeline:
                     score += 0.12 * hit
                 else:
                     score -= 0.1
-            if "sitting" in ql and "person" in sobj:
-                score += 0.05
             seg_rows.append({
                 "query": q,
                 "score": score,

@@ -5,7 +5,7 @@ This file is a lightweight repository snapshot for optional external compression
 ## Repository Identity
 
 - Project name: `Vision Guard`
-- Workspace path: `D:\CDAC PROJECT\visionguard-ai`
+- Workspace path: `D:\CDAC_PROJECT\vg-testing`
 - Runtime style: Python inference app with Gradio UI
 - Training loop present: no
 
@@ -48,9 +48,9 @@ This file is a lightweight repository snapshot for optional external compression
 1. normalize the query
 2. derive supported object and color hints
 3. run detector-first and semantic retrieval
-5. reselect dense best frames
-6. verify top candidates with Qwen in parallel
-7. cache verifier results by query and frame key
+4. reselect dense best frames
+5. verify top candidates with Qwen in parallel
+6. cache verifier results by query and frame key
 
 On Windows CPU development mode, Qwen verification is unavailable. The query path returns explicitly low-confidence semantic candidates instead of claiming a verified match.
 

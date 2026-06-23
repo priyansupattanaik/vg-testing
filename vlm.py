@@ -30,7 +30,7 @@ class SearchEncoder:
 
         self.p = AutoProcessor.from_pretrained(self.model_name)
         dtype = torch.float16 if self.dev == "cuda" else torch.float32
-        self.m = AutoModel.from_pretrained(self.model_name, dtype=dtype, device_map=None)
+        self.m = AutoModel.from_pretrained(self.model_name, torch_dtype=dtype, device_map=None)
         self.m.to(self.dev)
         self.m.eval()
         self._maybe_compile()

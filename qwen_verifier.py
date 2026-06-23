@@ -32,6 +32,15 @@ class QwenFrameVerifier:
         self.cache = {}
         self.lock = threading.Lock()
 
+    def _load_image(self, frame_path):
+        if not frame_path or not os.path.exists(frame_path):
+            return None
+        try:
+            with Image.open(frame_path) as image:
+                return image.convert("RGB")
+        except Exception:
+            return None
+
     def _confidence_threshold(self, query):
         if any(t in query.lower() for t in self._ABSTRACT_TERMS):
             return 0.30
@@ -76,7 +85,7 @@ class QwenFrameVerifier:
             self.processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_name,
-                dtype=dtype,
+                torch_dtype=dtype,
                 device_map="auto" if self.dev == "cuda" else None,
                 trust_remote_code=True,
             )
@@ -94,13 +103,15 @@ class QwenFrameVerifier:
     def _extract_json(self, text):
         if not text:
             return {}
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if not match:
-            return {}
-        try:
-            return json.loads(match.group(0))
-        except Exception:
-            return {}
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", text):
+            try:
+                value, _ = decoder.raw_decode(text[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return {}
 
     def _clean_boxes(self, boxes, size):
         w, h = size
@@ -110,7 +121,10 @@ class QwenFrameVerifier:
                 box = box.get("box") or box.get("bbox") or box.get("coordinates")
             if not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
-            vals = [float(x) for x in box]
+            try:
+                vals = [float(x) for x in box]
+            except (TypeError, ValueError):
+                continue
             if max(vals) <= 1.5:
                 vals = [vals[0] * w, vals[1] * h, vals[2] * w, vals[3] * h]
             if max(vals) <= 1000.0 and (vals[2] > w or vals[3] > h):
@@ -163,7 +177,9 @@ class QwenFrameVerifier:
     def _ask_vllm(self, frame_path, prompt, max_new_tokens=100):
         if self.vllm_engine is None or not frame_path or not os.path.exists(frame_path):
             return ""
-        image = Image.open(frame_path).convert("RGB")
+        image = self._load_image(frame_path)
+        if image is None:
+            return ""
         sampling = self.vllm_sampling
         if sampling is None or getattr(sampling, "max_tokens", None) != max_new_tokens:
             try:
@@ -202,13 +218,13 @@ class QwenFrameVerifier:
             return {
                 "matched": False,
                 "confidence": 0.0,
-                "caption": "[dev mode — Qwen skipped on Windows CPU]",
+                "caption": "[dev mode - Qwen skipped on Windows CPU]",
                 "boxes": []
             }
         key = self._cache_key(frame_path, query, frame_key=frame_key)
         if key in self.cache:
             return dict(self.cache[key])
-        image = Image.open(frame_path).convert("RGB") if frame_path and os.path.exists(frame_path) else None
+        image = self._load_image(frame_path)
         if image is None:
             return {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
         prompt = (
@@ -229,7 +245,10 @@ class QwenFrameVerifier:
         data = self._extract_json(raw)
         boxes = self._clean_boxes(data.get("boxes", []), image.size)
         matched = bool(data.get("matched", False))
-        confidence = float(data.get("confidence", 0.0) or 0.0)
+        try:
+            confidence = float(data.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
         if matched and not boxes:
             matched = False
         if confidence < self._confidence_threshold(query):

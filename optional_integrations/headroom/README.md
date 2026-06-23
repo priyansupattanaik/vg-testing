@@ -37,14 +37,13 @@ It is not a substitute for:
 - YOLO detection
 - SigLIP2 retrieval
 - Qwen verification
-- SAM2 segmentation
+- detector-box fallback gallery rendering
 
 ## Recommended Integration Boundary
 
 If Headroom is used later, keep it outside the Vision Guard runtime and apply it only after Vision Guard has already produced:
 
 - `index.json`
-- selected JSON / CSV / HTML reports
 - other large text artifacts intended for external LLM workflows
 
 ## Removal

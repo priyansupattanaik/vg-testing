@@ -114,16 +114,23 @@ def _gallery(rows):
 
 def scan_only(video):
     if not video:
-        yield "upload a video first", None, "", gr.update(interactive=False)
+        yield "upload a video first", None, "", gr.update(interactive=False), gr.update(interactive=False)
         return
-    yield "starting scan", None, "", gr.update(interactive=False)
+    yield "starting scan", None, "", gr.update(interactive=False), gr.update(interactive=False)
     meta = None
-    for ev in pipe.index_video_iter(video):
-        if ev["kind"] == "preview":
-            yield ev["status"], ev["image"], "", gr.update(interactive=False)
-        else:
-            meta = ev["meta"]
-    yield "scan complete", None, _meta(meta), gr.update(interactive=True)
+    try:
+        for ev in pipe.index_video_iter(video):
+            if ev["kind"] == "preview":
+                yield ev["status"], ev["image"], "", gr.update(interactive=False), gr.update(interactive=False)
+            else:
+                meta = ev.get("meta")
+    except Exception as exc:
+        yield f"scan failed: {exc}", None, "", gr.update(interactive=False), gr.update(interactive=False)
+        return
+    if not meta:
+        yield "scan failed: no index metadata was produced", None, "", gr.update(interactive=False), gr.update(interactive=False)
+        return
+    yield "scan complete", None, _meta(meta), gr.update(interactive=True), gr.update(interactive=True)
 
 
 def _find_payload(status, q, seg):
@@ -191,8 +198,7 @@ with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
             gallery = gr.Gallery(label="matched frames", columns=cfg.gallery_columns, height="auto")
             match_md = gr.Markdown(elem_classes="tight-md")
 
-    scan_btn.click(scan_only, [video], [status, live, info, query])
-    scan_btn.click(lambda: gr.update(interactive=True), None, find_btn)
+    scan_btn.click(scan_only, [video], [status, live, info, query, find_btn])
     scan_btn.click(lambda: "", None, searched)
     find_btn.click(find_query, [query], [status, answer, searched, table, gallery, match_md])
     demo.load(fn=get_system_status, inputs=None, outputs=status)

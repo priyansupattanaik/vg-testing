@@ -50,7 +50,7 @@ sequenceDiagram
 1. Creates a timestamped run directory.
 2. Samples frames through `DecordVideoReader`.
 3. Rejects low-information or near-duplicate frames.
-4. Runs YOLO detection and tracking on kept frames.
+4. Runs YOLO batch detection on kept frames.
 5. Adds object labels, detections, motion values, vehicle color tags, and appearance tags.
 6. Writes frame JPEGs while SigLIP2 embeds the pending batch.
 7. Builds frame and segment vector indexes.
@@ -176,9 +176,9 @@ No. User-facing clip generation, SAM2 segmentation, and HTML, CSV, JSON, ZIP, an
 
 The same frame can be used in retrieval, verification, and gallery boxing. The key prevents repeated model work for the same normalized query and frame.
 
-### Why is the shared thread pool limited to four workers?
+### Why is the shared thread pool configurable?
 
-The code uses four workers for JPEG writes and query verification. The limit bounds concurrent CPU/GPU-adjacent work and avoids unbounded task creation.
+The code uses `cfg.index_workers` workers for JPEG writes and query verification. The default is four workers, which bounds concurrent CPU/GPU-adjacent work without hard-coding the value.
 
 ### Does removing exports affect indexing speed?
 
@@ -196,7 +196,7 @@ No. Source compilation and static callback checks can be run without full depend
 
 ### `app.py`
 
-Builds the Gradio Blocks UI and owns UI event wiring. `_in_colab`, `_server_name`, and `_share_enabled` derive launch behavior. `_sample_videos` lists bundled MP4 examples. `_meta`, `_ans`, `_gallery`, and `_find_payload` transform pipeline dictionaries into Gradio values. `scan_only` streams four scan outputs. `find_query` streams six search outputs. `get_system_status` returns the warmup status. The module creates `VisionGuardPipeline`, starts its background warmup thread, and launches only when run as the main module.
+Builds the Gradio Blocks UI and owns UI event wiring. `_in_colab`, `_server_name`, and `_share_enabled` derive launch behavior. `_sample_videos` lists bundled MP4 examples. `_meta`, `_ans`, `_gallery`, and `_find_payload` transform pipeline dictionaries into Gradio values. `scan_only` streams five scan outputs (`status`, `live`, `info`, `query`, and `find_btn`). `find_query` streams six search outputs. `get_system_status` returns the warmup status. The module creates `VisionGuardPipeline`, starts its background warmup thread, and launches only when run as the main module.
 
 ### `settings.py`
 
@@ -208,11 +208,11 @@ Reads any supported Hugging Face token environment variable and configures persi
 
 ### `pipeline.py`
 
-`VisionGuardPipeline` orchestrates the application. `_estimate_color` creates vehicle appearance tags. `_new_run` creates one timestamped output directory. `_is_interesting_frame`, `_is_non_content_frame`, and signature helpers reduce duplicate/empty indexing work. `_candidate_hits` ranks detector, frame, fallback, weak-frame, and segment candidates. `_reselect_best_frame` chooses a better representative inside a hit window. `_verify_rows` and `_verify_rows_stream` apply Qwen verification. `_attach_gallery_frame` renders grounded or detector-fallback boxes. `index_video_iter` builds in-memory frame and segment indexes and writes internal artifacts. `search_stream` and `search` return confirmed rows, with detector fallback for supported object queries. `prepare_hits` formats gallery-ready rows.
+`VisionGuardPipeline` orchestrates the application. `_estimate_color` creates vehicle appearance tags. `_new_run` creates a timestamped output directory and avoids reusing an existing path. `_is_interesting_frame`, `_is_non_content_frame`, and signature helpers reduce duplicate/empty indexing work. `_candidate_hits` ranks detector, frame, fallback, weak-frame, and segment candidates. `_reselect_best_frame` chooses a better representative inside a hit window. `_verify_rows` and `_verify_rows_stream` apply Qwen verification. `_attach_gallery_frame` renders grounded or detector-fallback boxes. `index_video_iter` builds in-memory frame and segment indexes and writes internal artifacts. `search_stream` and `search` return confirmed rows, with detector fallback for supported object queries. `prepare_hits` formats gallery-ready rows.
 
 ### `tracker.py`
 
-`ObjectTracker` wraps Ultralytics YOLO. `load` selects the configured model and device. `class_ids` and `names` expose model classes. `track`, `detect`, and `detect_batch` normalize YOLO outputs into dictionaries containing `box`, `conf`, `cls`, and `name`.
+`ObjectTracker` wraps Ultralytics YOLO. `load` selects the configured model and device. `class_ids` and `names` expose model classes. `track`, `detect`, and `detect_batch` normalize YOLO outputs into dictionaries containing `box`, `conf`, `cls`, and `name`. The current indexing path uses `detect_batch`; tracked IDs are not populated into indexed frame metadata.
 
 ### `vlm.py`
 
@@ -238,7 +238,7 @@ Reads any supported Hugging Face token environment variable and configures persi
 
 | Component | Configured default | Code integration | Code-recorded rationale |
 | --- | --- | --- | --- |
-| Object detector | `yolo11m.pt` | `ObjectTracker` through Ultralytics YOLO | Used for class metadata, tracking, and detector fallback boxes. |
+| Object detector | `yolo11m.pt` | `ObjectTracker` through Ultralytics YOLO | Used for class metadata, batch detection, the optional tracking API, and detector fallback boxes. |
 | Image/text encoder | `google/siglip2-so400m-patch14-384` | `SearchEncoder` through Transformers | Produces normalized vectors for frame, segment, and text retrieval. |
 | Visual verifier | `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` | `QwenFrameVerifier` through vLLM or Transformers | Performs literal query confirmation and localization after candidate narrowing. |
 | Vector backend | turbovec, NumPy fallback | `SegmentVectorIndex` | Uses turbovec when importable; keeps NumPy exact search available when it is not. |
@@ -249,15 +249,15 @@ The repository does not contain benchmark results or a recorded comparison again
 
 ### Detection row
 
-`{"box": [x1, y1, x2, y2], "conf": number, "cls": integer, "name": string}`. Boxes are pixel coordinates from YOLO and are rounded to two decimals.
+`{"box": [x1, y1, x2, y2], "conf": number, "cls": integer, "name": string, "color": string or null}` once the pipeline enriches vehicle detections. Boxes are pixel coordinates from YOLO and are rounded to two decimals.
 
 ### Frame row
 
-Contains `frame_id`, `frame`, `ts`, `emb`, `frame_path`, and `meta`. The persisted/index metadata includes objects, appearances, detections, motion information, and tracking IDs.
+Contains `frame_id`, `frame`, `ts`, `emb`, `frame_path`, and `meta` while indexing is in memory. The persisted/index metadata includes objects, appearances, detections, motion information, and an empty `tracks` list in the current scan path.
 
 ### Search hit
 
-Contains `query`, `score`, `base_score`, `start`, `end`, `peak_ts`, frame paths, object/tracking metadata, summary text, and optional verifier fields. Gallery preparation adds `match_id`, `label`, `gallery_frame`, and `gallery_box_source` (`grounded`, `detector`, or `none`).
+Contains `query`, `score`, `base_score`, `start`, `end`, `peak_ts`, frame paths, object metadata, summary text, and optional verifier fields. Gallery preparation adds `match_id`, `label`, `gallery_frame`, and `gallery_box_source` (`grounded`, `detector`, or `none`). `tracks` may be present but is empty in the current indexing path.
 
 ### Verifier response
 
@@ -265,6 +265,6 @@ Contains `query`, `score`, `base_score`, `start`, `end`, `peak_ts`, frame paths,
 
 ## 17. Compatibility and troubleshooting
 
-The requirements pin Gradio to `>=5,<6` and Transformers to `>=4.57,<5`. The project was observed with Gradio 6.19.0, whose browser bundle raised an undefined-index JavaScript error while the app used pre-6 UI behavior, and Transformers 5.12.1, which emitted model token-config warnings. The verified environment now has Gradio 5.50.0 and Transformers 4.57.6. Restart the app after dependency changes. `pip check` and Ruff lint both pass in that environment.
+The requirements pin Gradio to `>=5,<6` and Transformers to `>=4.57,<5`. Restart the app after dependency changes so the runtime reloads the installed packages.
 
-The `HTTP_422_UNPROCESSABLE_ENTITY` messages are Gradio/Starlette deprecation warnings. `WinError 10054` is a closed client socket. Neither message alone proves a retrieval-model failure. Hugging Face authentication warnings indicate reduced download rate limits; set `HF_TOKEN` to authenticate downloads.
+Hugging Face authentication warnings indicate reduced download rate limits; set `HF_TOKEN` to authenticate downloads. On Windows without CUDA, the verifier intentionally uses `dev_passthrough` instead of full Qwen inference.

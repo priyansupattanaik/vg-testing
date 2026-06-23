@@ -69,23 +69,23 @@ Operational settings are read from environment variables when the application st
 
 ## Runtime layout
 
-- `app.py` — Gradio UI and scan/search event wiring
-- `pipeline.py` — indexing, retrieval, reranking, verification, and boxed-image creation
-- `segmenter.py` — query-grounding adapter with detector-box fallback
-- `qwen_verifier.py` — visual verification, box cleaning, caching, and backend selection
-- `tracker.py` — YOLO detection and tracking wrapper
-- `vlm.py` — SigLIP2 image/text embeddings
-- `vector_index.py` — frame and segment vector search
-- `video_reader.py` — Decord/OpenCV video access
-- `cache_utils.py` — model-cache configuration
+- `app.py` - Gradio UI and scan/search event wiring
+- `pipeline.py` - indexing, retrieval, reranking, verification, and boxed-image creation
+- `segmenter.py` - query-grounding adapter with detector-box fallback
+- `qwen_verifier.py` - visual verification, box cleaning, caching, and backend selection
+- `tracker.py` - YOLO detection and tracking wrapper
+- `vlm.py` - SigLIP2 image/text embeddings
+- `vector_index.py` - frame and segment vector search
+- `video_reader.py` - Decord/OpenCV video access
+- `cache_utils.py` - model-cache configuration
 
 ## Run output
 
 Each scan creates a timestamped directory under `output/` containing:
 
-- `frames/` — sampled and reselected frame images
-- `segments/` — boxed gallery-match images
-- `reports/` — internal index artifacts (`frame_index.tvim`, `segment_index.tvim`, and `index.json`)
+- `frames/` - sampled and reselected frame images
+- `segments/` - boxed gallery-match images
+- `reports/` - internal index artifacts (`frame_index.tvim`, `segment_index.tvim`, and `index.json`)
 
 The internal index artifacts are not exposed as user downloads.
 
