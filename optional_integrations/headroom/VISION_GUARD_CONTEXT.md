@@ -62,7 +62,7 @@ On Windows CPU development mode, Qwen verification is unavailable. The query pat
 
 ## Current Notable Constraints
 
-- event-style queries use semantic retrieval and Qwen verification
+- detailed natural-language queries use semantic retrieval and Qwen verification
 - vehicle paint tags apply only to vehicle queries; clothing-color phrases use semantic retrieval
 - unsupported simple exact-object labels are rejected conservatively
 - Windows CPU uses a verifier development bypass rather than full Qwen inference

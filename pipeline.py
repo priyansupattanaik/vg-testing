@@ -209,24 +209,12 @@ class VisionGuardPipeline:
                 out.add(label)
         return sorted(out)
 
-    def _is_event_query(self, q):
-        q = f" {self._normalize_query(q)} "
-        terms = {
-            " accident ", " collision ", " crash ", " hit-and-run ", " pileup ",
-            " fight ", " fighting ", " assault ", " brawl ",
-            " fall ", " falling ", " collapse ",
-            " crowd ", " crowded ", " gathering ",
-            " loitering ", " loiter ", " suspicious ", " violence ",
-        }
-        return any(term in q for term in terms)
-
     def _normalize_query(self, q):
         q = q.strip().lower()
         repl = {
             "peoples": "people",
             "persons": "person",
             "human beings": "people",
-            "bike accident": "motorcycle accident",
             "bikes": "bicycle",
             "cycles": "bicycle",
             "cars": "car",
@@ -266,7 +254,7 @@ class VisionGuardPipeline:
 
     def _is_simple_unsupported_object_query(self, q):
         tokens = self._normalize_query(q).split()
-        if not tokens or self._q_objs(q) or self._is_event_query(q):
+        if not tokens or self._q_objs(q):
             return False
         color_words = set(self._color_words())
         stop_words = {
@@ -973,12 +961,12 @@ class VisionGuardPipeline:
         if self._is_simple_unsupported_object_query(raw_q):
             return q, None, qobjs, [], 0
         qv = self._embed_query(raw_q)
-        deep = self._is_event_query(raw_q) or not self._is_strict_object_query(q)
-        candidate_limit = min(max(top_k * 3, 8), max(8, len(self.idx.get("frames", [])))) if deep else top_k
+        detailed = not self._is_strict_object_query(q)
+        candidate_limit = min(max(top_k * 3, 8), max(8, len(self.idx.get("frames", [])))) if detailed else top_k
         detector_hits = self._refine_detector_hits(q, candidate_limit)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=min(4, len(detector_hits)))
-            return q, qv, qobjs, hits, min(8 if deep else 4, len(hits))
+            return q, qv, qobjs, hits, min(8 if detailed else 4, len(hits))
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -1026,7 +1014,7 @@ class VisionGuardPipeline:
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
-            verify_n = min(8, len(out)) if deep or not qobjs else min(4, len(out))
+            verify_n = min(8, len(out)) if detailed or not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
@@ -1040,7 +1028,7 @@ class VisionGuardPipeline:
                 hit["retrieval_mode"] = "weak_semantic"
             if weak:
                 weak = self._apply_reselection(weak, q, qv, top_n=min(4, len(weak)))
-                verify_n = min(8, len(weak)) if deep or not qobjs else 1
+                verify_n = min(8, len(weak)) if detailed or not qobjs else 1
                 return q, qv, qobjs, weak, verify_n
         n = len(self.idx["segments"])
         if n == 0:
@@ -1090,7 +1078,7 @@ class VisionGuardPipeline:
             out.append(row)
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
-            verify_n = min(8, len(out)) if deep or not qobjs else min(4, len(out))
+            verify_n = min(8, len(out)) if detailed or not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         return q, qv, qobjs, [], 0
 

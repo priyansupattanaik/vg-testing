@@ -11,14 +11,6 @@ _DEV_MODE = platform.system() == "Windows" and not torch.cuda.is_available()
 
 
 class QwenFrameVerifier:
-    _ABSTRACT_TERMS = frozenset({
-        "fight","fighting","assault","brawl",
-        "fall","falling","collapse",
-        "collision","collide","crash","accident",
-        "crowd","crowded","gathering",
-        "loitering","loiter","suspicious","violence"
-    })
-
     def __init__(self, model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,11 +32,6 @@ class QwenFrameVerifier:
                 return image.convert("RGB")
         except Exception:
             return None
-
-    def _confidence_threshold(self, query):
-        if any(t in query.lower() for t in self._ABSTRACT_TERMS):
-            return 0.30
-        return 0.45
 
     def load(self):
         if _DEV_MODE:
@@ -251,7 +238,7 @@ class QwenFrameVerifier:
             confidence = 0.0
         if matched and not boxes:
             matched = False
-        if confidence < self._confidence_threshold(query):
+        if confidence < 0.45:
             matched = False
         result = {
             "matched": matched,

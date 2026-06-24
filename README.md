@@ -22,7 +22,7 @@ Indexing uses YOLO, SigLIP2, and the vector indexes. Query verification uses Qwe
 
 - Scan-time frame sampling, duplicate filtering, object detection, and frame/segment indexing
 - Detector-first retrieval for supported objects and vehicle colors
-- Semantic retrieval for detailed and event-style language
+- Semantic retrieval for detailed natural-language phrases
 - Dense frame reselection before verification
 - Conservative Qwen visual verification with localized bounding boxes
 - Grounded and clearly labeled detector-fallback boxed result images saved under each run's `segments/` directory
@@ -34,7 +34,7 @@ Supported detector objects include `person`, `car`, `truck`, `bus`, `motorcycle`
 
 Vehicle-color queries support `yellow`, `white`, `black`, `gray`, `red`, `blue`, `green`, `orange`, and `brown`. Vehicle color is estimated from the centered 45% of the detected box to reduce road and shadow influence.
 
-Detailed queries such as `person near a gate`, `yellow car entering`, or `car collision` proceed through semantic retrieval and Qwen verification. A displayed verified result requires Qwen to confirm and localize the query. On Windows CPU development mode, the app returns clearly labeled low-confidence visual candidates because Qwen verification is unavailable. Gallery captions identify whether the box is grounded, a detector fallback, or not localized.
+Detailed queries such as `person near a gate`, `yellow car entering`, or `blue truck` proceed through semantic retrieval and Qwen verification. A displayed verified result requires Qwen to confirm and localize the query. On Windows CPU development mode, the app returns clearly labeled low-confidence visual candidates because Qwen verification is unavailable. Gallery captions identify whether the box is grounded, a detector fallback, or not localized.
 
 ## Run locally
 

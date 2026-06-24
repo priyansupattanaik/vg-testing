@@ -68,7 +68,7 @@ Indexing does not run Qwen verification or grounding. Removing user exports did 
 4. Low-confidence frame clustering for non-strict queries.
 5. Segment ANN retrieval.
 
-Top candidates are densely reselected from the original video before verification. Strict object queries verify up to four candidates; detailed or event-style queries verify up to eight through the existing shared worker pool. Detailed detector queries retain a larger internal candidate pool before this step. This increases recall for detailed queries without modifying indexing work.
+Top candidates are densely reselected from the original video before verification. Strict object queries verify up to four candidates; detailed queries verify up to eight through the existing shared worker pool. Detailed detector queries retain a larger internal candidate pool before this step. This increases recall for detailed queries without modifying indexing work.
 
 Vehicle color metadata applies only to vehicle object classes. Clothing-color phrases such as `person wearing yellow jacket` remain semantic queries rather than being rejected because people do not have vehicle paint tags.
 
@@ -132,7 +132,7 @@ The configurable values cover model identifiers, YOLO confidence/image size, wor
 - The verifier is invoked only after retrieval narrows the candidate set; it is not an exhaustive video scan.
 - On Windows CPU development mode, Qwen is unavailable. The search path returns low-confidence semantic candidates with an explicit unverified status instead of returning an empty result or claiming verification.
 - Detailed-query verification can take longer than simple object retrieval because it examines more candidates.
-- A gallery box proves that a grounding result or detector fallback was available; it is not a guarantee of real-world identity or event truth.
+- A gallery box proves that a grounding result or detector fallback was available; it is not a guarantee of real-world identity or truth.
 
 ## 13. Review questions and answers
 
@@ -155,10 +155,6 @@ Qwen verification is more expensive than vector search. ANN retrieval narrows th
 ### Why reject unsupported simple object labels conservatively?
 
 Treating an unsupported label as a nearby supported class can create misleading matches. The code avoids that substitution.
-
-### Are event queries disabled?
-
-No. Event-style queries now continue into semantic retrieval and Qwen verification. Their accuracy depends on whether the event is visibly represented in the candidate frames.
 
 ### How does vehicle color work?
 
@@ -291,7 +287,7 @@ The frame index has one vector per retained frame. Segment construction is delib
 
 ### 18.3 Exact query mechanics
 
-`_normalize_query` lowercases, trims, collapses spaces, and replaces: `peoples`/`persons` with `person`; `human beings` with `people`; `bike accident` with `motorcycle accident`; `bikes` with `bicycle`; `cycles` with `bicycle`; `cars`, `trucks`, `buses`, and `umbrellas` with singular forms.
+`_normalize_query` lowercases, trims, collapses spaces, and replaces: `peoples`/`persons` with `person`; `human beings` with `people`; `bikes` with `bicycle`; `cycles` with `bicycle`; `cars`, `trucks`, `buses`, and `umbrellas` with singular forms.
 
 `_q_objs` combines fixed natural-language aliases with literal labels from `self.trk.names()`. It also creates naive singular forms for query words longer than three characters ending in `s`; a multiword detector label is included only when every label word occurs in the query word set. This enables labels exposed by the configured detector beyond the fixed alias map. `_is_strict_object_query` remains a fixed token allowlist, so dynamic labels can be detector-recognized yet treated as detailed/non-strict.
 
@@ -305,7 +301,7 @@ The frame index has one vector per retained frame. Segment construction is delib
 | Weak semantic | Non-strict query only; clusters the highest ranked rows without the frame-score threshold and marks them low confidence. |
 | Segment semantic | Top `min(max(top_k*8, 24), segment_count)` hits; object intersections add 0.12 each or subtract 0.1 when none; score must be at least 0.18. |
 
-Temporal detector/frame spacing is `max(sample_sec*1.25, 1.0)`; object fallback spacing is two seconds; segment spacing is three seconds. Detailed/event queries use an internal detector candidate limit of `min(max(top_k*3, 8), max(8, frame_count))` and verify up to eight rows. Strict detector queries use `top_k` candidates and verify up to four.
+Temporal detector/frame spacing is `max(sample_sec*1.25, 1.0)`; object fallback spacing is two seconds; segment spacing is three seconds. Detailed queries use an internal detector candidate limit of `min(max(top_k*3, 8), max(8, frame_count))` and verify up to eight rows. Strict detector queries use `top_k` candidates and verify up to four.
 
 ### 18.4 Dense reselection, verification, and gallery
 
@@ -330,7 +326,7 @@ On `dev_passthrough` (Windows without CUDA at verifier-module import time), `sea
 | `_iou`, `_cos` | Two boxes/two vectors. | IoU/cosine calculations; neither has a current call site in this file. |
 | `_new_run`, `_preview` | Video path/frame/detections/timestamp. | Creates run folders or RGB annotated progress image. |
 | `_is_non_content_frame`, `_cheap_signature`, `_frame_diff_score`, `_is_interesting_frame` | Frame/signatures/timing. | Content/duplicate filtering decisions and reasons. |
-| `_q_objs`, `_is_event_query`, `_normalize_query`, `_query_detector_classes`, `_is_strict_object_query`, `_is_simple_unsupported_object_query` | Query text. | Query interpretation used by retrieval. |
+| `_q_objs`, `_normalize_query`, `_query_detector_classes`, `_is_strict_object_query`, `_is_simple_unsupported_object_query` | Query text. | Query interpretation used by retrieval. |
 | `_matching_detections`, `_refine_detector_hits` | Indexed rows/query classes/colors. | Detector-ranked candidate hits. |
 | `_draw_boxes`, `_gallery_fallback_boxes`, `_attach_gallery_frame` | Frame/hit/query/boxes. | Gallery path and box-source state. |
 | `_query_variants`, `_embed_query`, `_frame_summary`, `_clip_bounds` | Query/hit metadata. | Embedding variants, text summaries, bounded clip interval. |
@@ -406,7 +402,7 @@ Not in the current code. Segment aggregation repeats for every retained frame in
 
 The flag is set for weak semantic/object-fallback paths, verifier nonmatches, or Windows CPU passthrough. It is a control-flow/UI label, not a calibrated uncertainty value.
 
-### Does the repository establish identity recognition, intent detection, or factual event proof?
+### Does the repository establish identity recognition, intent detection, or factual proof?
 
 No. It indexes visible frames, detects configured classes, ranks embeddings, applies heuristic appearance tags, and asks a VLM to assess visible evidence. It contains no identity model, authentication system, or real-world truth guarantee.
 
