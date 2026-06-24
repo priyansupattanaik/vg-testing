@@ -4,6 +4,8 @@ Vision Guard is a scan-first CCTV video search app with a Gradio interface. It i
 
 ## Current flow
 
+![Vision Guard AI: CCTV Search and Analysis Pipeline](CCTV_Search_and_Analysis_Pipeline.png)
+
 ```mermaid
 flowchart LR
     A["Upload video"] --> B["Sample and filter frames"]
